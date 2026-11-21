@@ -1380,8 +1380,10 @@ body.finish-celebration-active .score {
   stroke-width: 1.25px;
   stroke-opacity: 0.7;
   stroke-dasharray: 2 3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+  stroke-miterlimit: 2;
+  stroke-opacity: 1;
   pointer-events: none;
 }
 
@@ -1391,7 +1393,10 @@ body.finish-celebration-active .score {
   stroke-width: 1.5px;
   stroke-opacity: 0.7;
   stroke-dasharray: 1.5 2.2;
-  stroke-linecap: round;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+  stroke-miterlimit: 2;
+  stroke-opacity: 1;
   pointer-events: none;
   cursor: default;
 }
@@ -4031,10 +4036,414 @@ body.finish-celebration-active .score {
     return chains;
   }
 
-  function appendInsetStroke(parent, chain, project) {
+  function regionPointsNear(a, b) {
+    return Math.abs(a[0] - b[0]) < 1e-8 && Math.abs(a[1] - b[1]) < 1e-8;
+  }
+
+  /** Drop out-and-back spurs so a face is one simple ring. */
+  function simplifyRegionRing(ring) {
+    const count = ringVertexCount(ring);
+    const open = [];
+    for (let i = 0; i < count; i += 1) open.push([ring[i][0], ring[i][1]]);
+    let guard = 0;
+    while (open.length >= 4 && guard < open.length * 4) {
+      guard += 1;
+      let removed = false;
+      for (let i = open.length - 1; i >= 0; i -= 1) {
+        const prev = open[(i + open.length - 1) % open.length];
+        if (regionPointsNear(prev, open[i])) {
+          open.splice(i, 1);
+          removed = true;
+        }
+      }
+      if (open.length < 4) break;
+      for (let i = 0; i < open.length; i += 1) {
+        const prev = open[(i + open.length - 1) % open.length];
+        const next = open[(i + 1) % open.length];
+        if (!regionPointsNear(prev, next)) continue;
+        open.splice(i, 1);
+        removed = true;
+        break;
+      }
+      if (!removed) break;
+    }
+    if (open.length < 3) return ring.map((point) => [point[0], point[1]]);
+    const out = open.map((point) => [point[0], point[1]]);
+    out.push([out[0][0], out[0][1]]);
+    return out;
+  }
+
+  function regionEdgeHit(a, b, c, d) {
+    const ax = a[1];
+    const ay = a[0];
+    const bx = b[1];
+    const by = b[0];
+    const cx = c[1];
+    const cy = c[0];
+    const dx = d[1];
+    const dy = d[0];
+    const rx = bx - ax;
+    const ry = by - ay;
+    const sx = dx - cx;
+    const sy = dy - cy;
+    const den = rx * sy - ry * sx;
+    if (Math.abs(den) < 1e-14) return null;
+    const t = ((cx - ax) * sy - (cy - ay) * sx) / den;
+    const u = ((cx - ax) * ry - (cy - ay) * rx) / den;
+    if (t <= 1e-5 || t >= 1 - 1e-5 || u <= 1e-5 || u >= 1 - 1e-5) return null;
+    return { t, u, point: [ay + t * ry, ax + t * rx] };
+  }
+
+  function regionOpen(ring) {
+    const count = ringVertexCount(ring);
+    const open = [];
+    for (let i = 0; i < count; i += 1) open.push([ring[i][0], ring[i][1]]);
+    return open;
+  }
+
+  function regionInsertHits(open, hits) {
+    const byEdge = new Map();
+    hits.forEach((hit) => {
+      if (!byEdge.has(hit.edge)) byEdge.set(hit.edge, []);
+      byEdge.get(hit.edge).push(hit);
+    });
+    const seq = [];
+    for (let i = 0; i < open.length; i += 1) {
+      seq.push({ p: open[i], hit: false });
+      const list = (byEdge.get(i) || []).slice().sort((left, right) => left.t - right.t);
+      list.forEach((hit) => {
+        seq.push({ p: hit.point, hit: true, id: hit.id });
+      });
+    }
+    return seq;
+  }
+
+  function regionWalkHits(seq, fromId, toId) {
+    const start = seq.findIndex((node) => node.hit && node.id === fromId);
+    if (start < 0) return null;
+    const path = [seq[start].p];
+    let index = (start + 1) % seq.length;
+    for (let guard = 0; guard <= seq.length; guard += 1) {
+      path.push(seq[index].p);
+      if (seq[index].hit && seq[index].id === toId) return path;
+      index = (index + 1) % seq.length;
+    }
+    return null;
+  }
+
+  function regionArcInside(path, ring) {
+    if (!path || path.length < 2) return false;
+    let inside = 0;
+    let total = 0;
+    for (let i = 1; i < path.length - 1; i += 1) {
+      total += 1;
+      if (pointInRing(path[i][0], path[i][1], ringAsLngLat(ring))) inside += 1;
+    }
+    if (!total) {
+      const mid = [(path[0][0] + path[1][0]) / 2, (path[0][1] + path[1][1]) / 2];
+      return pointInRing(mid[0], mid[1], ringAsLngLat(ring));
+    }
+    return inside * 2 >= total;
+  }
+
+  /**
+   * Where the Hawaii loop crosses a face, replace the arc inside that face
+   * with the face edge between the same two points so the regions abut.
+   */
+  function abutRegionRing(subjectRing, clipRing) {
+    const subject = regionOpen(subjectRing);
+    const clip = regionOpen(clipRing);
+    const hits = [];
+    for (let i = 0; i < subject.length; i += 1) {
+      const a = subject[i];
+      const b = subject[(i + 1) % subject.length];
+      for (let k = 0; k < clip.length; k += 1) {
+        const hit = regionEdgeHit(a, b, clip[k], clip[(k + 1) % clip.length]);
+        if (!hit) continue;
+        const duplicate = hits.some((item) => regionPointsNear(item.point, hit.point));
+        if (duplicate) continue;
+        hits.push({
+          edge: i,
+          t: hit.t,
+          clipEdge: k,
+          u: hit.u,
+          point: hit.point,
+        });
+      }
+    }
+    if (hits.length !== 2) return null;
+    hits[0].id = 0;
+    hits[1].id = 1;
+    const subjectHits = hits.map((hit) => ({ edge: hit.edge, t: hit.t, point: hit.point, id: hit.id }));
+    const clipHits = hits.map((hit) => ({ edge: hit.clipEdge, t: hit.u, point: hit.point, id: hit.id }));
+    const subjectSeq = regionInsertHits(subject, subjectHits);
+    const clipSeq = regionInsertHits(clip, clipHits);
+    const subjectArcs = [regionWalkHits(subjectSeq, 0, 1), regionWalkHits(subjectSeq, 1, 0)].filter(Boolean);
+    const clipArcs = [regionWalkHits(clipSeq, 0, 1), regionWalkHits(clipSeq, 1, 0)].filter(Boolean);
+    if (subjectArcs.length !== 2 || clipArcs.length !== 2) return null;
+    const outside = subjectArcs.find((arc) => !regionArcInside(arc, clipRing));
+    const shared = clipArcs.find((arc) => regionArcInside(arc, subjectRing));
+    if (!outside || !shared) return null;
+    let seam = shared.map((point) => [point[0], point[1]]);
+    const end = outside[outside.length - 1];
+    if (!regionPointsNear(seam[0], end)) seam.reverse();
+    if (!regionPointsNear(seam[0], end) || !regionPointsNear(seam[seam.length - 1], outside[0])) return null;
+    const ring = outside.map((point) => [point[0], point[1]]);
+    seam.slice(1, -1).forEach((point) => ring.push([point[0], point[1]]));
+    ring.push([ring[0][0], ring[0][1]]);
+    const clipOut = [];
+    clipSeq.forEach((node) => clipOut.push([node.p[0], node.p[1]]));
+    clipOut.push([clipOut[0][0], clipOut[0][1]]);
+    return { subject: ring, clip: clipOut };
+  }
+
+  function cleanRegionStrokes(strokes) {
+    const rings = strokes.map((stroke) => simplifyRegionRing(stroke));
+    let hawaii = 0;
+    rings.forEach((ring, index) => {
+      if (ringVertexCount(ring) > ringVertexCount(rings[hawaii])) hawaii = index;
+    });
+    if (ringVertexCount(rings[hawaii]) > 40) {
+      rings.forEach((face, index) => {
+        if (index === hawaii) return;
+        const joined = abutRegionRing(rings[hawaii], face);
+        if (!joined) return;
+        rings[hawaii] = joined.subject;
+        rings[index] = joined.clip;
+      });
+      rings[hawaii] = simplifyRegionRing(rings[hawaii]);
+    }
+    return rings.filter((ring) => ringVertexCount(ring) >= 3);
+  }
+
+  /** One polyline per border. A shared edge is not stroked by both neighbors. */
+  function regionBorderChains(strokes) {
+    const keyOf = (point) => `${point[0].toFixed(5)},${point[1].toFixed(5)}`;
+    const verts = [];
+    const indexOf = new Map();
+    const vertex = (point) => {
+      const key = keyOf(point);
+      if (indexOf.has(key)) return indexOf.get(key);
+      const index = verts.length;
+      indexOf.set(key, index);
+      verts.push([point[0], point[1]]);
+      return index;
+    };
+    const adj = new Map();
+    const link = (from, to) => {
+      if (!adj.has(from)) adj.set(from, []);
+      const list = adj.get(from);
+      if (!list.includes(to)) list.push(to);
+    };
+    const seen = new Set();
+    strokes.forEach((stroke) => {
+      const count = ringVertexCount(stroke);
+      for (let i = 0; i < count; i += 1) {
+        const a = vertex(stroke[i]);
+        const b = vertex(stroke[(i + 1) % count]);
+        if (a === b) continue;
+        const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        link(a, b);
+        link(b, a);
+      }
+    });
+    const used = new Set();
+    const edgeKey = (a, b) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+    const chains = [];
+    const walk = (start, next) => {
+      const chain = [[verts[start][0], verts[start][1]]];
+      let prev = start;
+      let cur = next;
+      used.add(edgeKey(prev, cur));
+      for (let guard = 0; guard < verts.length + 2; guard += 1) {
+        chain.push([verts[cur][0], verts[cur][1]]);
+        const degree = (adj.get(cur) || []).length;
+        const onward = (adj.get(cur) || []).filter((item) => item !== prev);
+        if (degree !== 2 || onward.length !== 1 || used.has(edgeKey(cur, onward[0]))) break;
+        used.add(edgeKey(cur, onward[0]));
+        prev = cur;
+        cur = onward[0];
+      }
+      return chain;
+    };
+    verts.forEach((_, index) => {
+      if ((adj.get(index) || []).length === 2) return;
+      adj.get(index).forEach((next) => {
+        if (used.has(edgeKey(index, next))) return;
+        const chain = walk(index, next);
+        if (chain.length >= 2) chains.push(chain);
+      });
+    });
+    seen.forEach((key) => {
+      if (used.has(key)) return;
+      const [a, b] = key.split(":").map(Number);
+      const chain = walk(a, b);
+      if (chain.length >= 2) chains.push(chain);
+    });
+    return chains;
+  }
+
+  function cleanRegionBorderChains(strokes) {
+    return regionBorderChains(cleanRegionStrokes(strokes));
+  }
+
+  /**
+   * Collinear borders pass through a joint as one stroke. Any other edge
+   * stops at the side of that stroke so dash ends do not stack into a blob.
+   * `lines` are {x, y} points in the same plane as `strokeWidth`.
+   */
+  function joinSafePolylines(lines, strokeWidth) {
+    const polys = lines
+      .map((line) => line.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)))
+      .filter((line) => line.length >= 2);
+    const snap = (point) => `${Math.round(point.x * 50)},${Math.round(point.y * 50)}`;
+    const closedOf = (poly) => Math.hypot(poly[0].x - poly[poly.length - 1].x, poly[0].y - poly[poly.length - 1].y) < 0.2;
+    const ends = [];
+    polys.forEach((poly, index) => {
+      if (closedOf(poly)) return;
+      const make = (atStart) => {
+        const from = atStart ? poly[0] : poly[poly.length - 1];
+        const toward = atStart ? poly[1] : poly[poly.length - 2];
+        return {
+          index,
+          atStart,
+          key: snap(from),
+          angle: Math.atan2(toward.y - from.y, toward.x - from.x),
+          trim: 0,
+        };
+      };
+      ends.push(make(true), make(false));
+    });
+    const eid = (end) => `${end.index}:${end.atStart ? 1 : 0}`;
+    const groups = new Map();
+    ends.forEach((end) => {
+      if (!groups.has(end.key)) groups.set(end.key, []);
+      groups.get(end.key).push(end);
+    });
+    const link = new Map();
+    groups.forEach((group) => {
+      if (group.length < 2) return;
+      const candidates = [];
+      for (let i = 0; i < group.length; i += 1) {
+        for (let j = i + 1; j < group.length; j += 1) {
+          let diff = Math.abs(group[i].angle - group[j].angle);
+          if (diff > Math.PI) diff = (Math.PI * 2) - diff;
+          candidates.push({ i, j, deviation: Math.abs(diff - Math.PI) });
+        }
+      }
+      candidates.sort((a, b) => a.deviation - b.deviation);
+      const used = new Set();
+      candidates.forEach((pair) => {
+        if (pair.deviation > 0.4) return;
+        if (used.has(pair.i) || used.has(pair.j)) return;
+        used.add(pair.i);
+        used.add(pair.j);
+        link.set(eid(group[pair.i]), group[pair.j]);
+        link.set(eid(group[pair.j]), group[pair.i]);
+      });
+      group.forEach((end, index) => {
+        if (used.has(index)) return;
+        let phi = Math.PI / 2;
+        group.forEach((other, otherIndex) => {
+          if (otherIndex === index) return;
+          let diff = Math.abs(end.angle - other.angle);
+          if (diff > Math.PI) diff = (Math.PI * 2) - diff;
+          phi = Math.min(phi, Math.min(diff, Math.PI - diff));
+        });
+        const safe = Math.max(0.35, Math.min(Math.PI / 2, phi));
+        end.trim = (strokeWidth / 2) / Math.sin(safe);
+      });
+    });
+    const endById = new Map(ends.map((end) => [eid(end), end]));
+    const seen = new Set();
+    const pull = (points, fromStart, distance) => {
+      let left = distance;
+      if (fromStart) {
+        while (points.length >= 2 && left > 0) {
+          const step = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y) || 0.01;
+          if (step > left + 0.05) {
+            const t = left / step;
+            points[0] = {
+              x: points[0].x + (points[1].x - points[0].x) * t,
+              y: points[0].y + (points[1].y - points[0].y) * t,
+            };
+            return;
+          }
+          left -= step;
+          points.shift();
+        }
+        return;
+      }
+      while (points.length >= 2 && left > 0) {
+        const last = points.length - 1;
+        const step = Math.hypot(points[last].x - points[last - 1].x, points[last].y - points[last - 1].y) || 0.01;
+        if (step > left + 0.05) {
+          const t = left / step;
+          points[last] = {
+            x: points[last].x + (points[last - 1].x - points[last].x) * t,
+            y: points[last].y + (points[last - 1].y - points[last].y) * t,
+          };
+          return;
+        }
+        left -= step;
+        points.pop();
+      }
+    };
+    const lengthOf = (points) => {
+      let total = 0;
+      for (let i = 1; i < points.length; i += 1) {
+        total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+      }
+      return total;
+    };
+    const orderedFrom = (index, atStart) => {
+      const copy = polys[index].map((point) => ({ x: point.x, y: point.y }));
+      if (!atStart) copy.reverse();
+      return copy;
+    };
+    const merged = [];
+    polys.forEach((_, index) => {
+      if (seen.has(index)) return;
+      if (closedOf(polys[index])) {
+        seen.add(index);
+        merged.push(polys[index].map((point) => ({ x: point.x, y: point.y })));
+        return;
+      }
+      let start = endById.get(`${index}:1`);
+      const walked = new Set([index]);
+      for (let guard = 0; guard < polys.length + 2; guard += 1) {
+        const prev = link.get(eid(start));
+        if (!prev || walked.has(prev.index)) break;
+        walked.add(prev.index);
+        start = endById.get(`${prev.index}:${prev.atStart ? 0 : 1}`);
+      }
+      seen.add(start.index);
+      const points = orderedFrom(start.index, start.atStart);
+      let cursor = start;
+      for (let guard = 0; guard < polys.length + 2; guard += 1) {
+        const farId = `${cursor.index}:${cursor.atStart ? 0 : 1}`;
+        const next = link.get(farId);
+        if (!next || seen.has(next.index)) break;
+        seen.add(next.index);
+        const adding = orderedFrom(next.index, next.atStart);
+        adding.shift();
+        points.push(...adding);
+        cursor = next;
+      }
+      const tail = endById.get(`${cursor.index}:${cursor.atStart ? 0 : 1}`);
+      const span = lengthOf(points);
+      if (start.trim) pull(points, true, Math.min(start.trim, span * 0.45));
+      if (tail && tail.trim) pull(points, false, Math.min(tail.trim, lengthOf(points) * 0.45));
+      if (points.length >= 2 && lengthOf(points) > 0.4) merged.push(points);
+    });
+    return merged;
+  }
+
+  function appendPixelStroke(parent, line) {
     let d = "";
-    chain.forEach(([lng, lat], index) => {
-      const point = project(lng, lat);
+    line.forEach((point, index) => {
       d += `${index === 0 ? "M" : "L"}${point.x.toFixed(2)} ${point.y.toFixed(2)} `;
     });
     const path = document.createElementNS(SVG_NS, "path");
@@ -4043,9 +4452,11 @@ body.finish-celebration-active .score {
     path.setAttribute("fill", "none");
     path.setAttribute("stroke", ISLAND_REGION_STROKE);
     path.setAttribute("stroke-width", "1.5");
-    path.setAttribute("stroke-opacity", "0.7");
+    path.setAttribute("stroke-opacity", "1");
     path.setAttribute("stroke-dasharray", "1.5 2.2");
-    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linecap", "butt");
+    path.setAttribute("stroke-linejoin", "miter");
+    path.setAttribute("stroke-miterlimit", "2");
     path.setAttribute("pointer-events", "none");
     parent.appendChild(path);
   }
@@ -4054,11 +4465,16 @@ body.finish-celebration-active .score {
     if (place !== "pacific" && place !== "hawaii") return;
     const region = islandRegions();
     if (!region.kept) return;
-    region.strokes.forEach((stroke) => {
+    const pixelLines = [];
+    cleanRegionBorderChains(region.strokes).forEach((stroke) => {
       clipStrokeToFrame(stroke, frame).forEach((chain) => {
-        appendInsetStroke(parent, chain, project);
+        pixelLines.push(chain.map(([lng, lat]) => {
+          const point = project(lng, lat);
+          return { x: point.x, y: point.y };
+        }));
       });
     });
+    joinSafePolylines(pixelLines, 1.5).forEach((line) => appendPixelStroke(parent, line));
   }
 
   /** Dotted lat/lng strokes from the kept inset fit. Redrawn after layout; not pixel offsets. */
@@ -4077,7 +4493,8 @@ body.finish-celebration-active .score {
       pane.style.pointerEvents = "none";
     }
     const layer = L.layerGroup();
-    region.strokes.forEach((stroke) => {
+    const pixelLines = [];
+    cleanRegionBorderChains(region.strokes).forEach((stroke) => {
       splitStrokeAtDateline(stroke).forEach((part) => {
         let minLng = Infinity;
         let maxLng = -Infinity;
@@ -4087,17 +4504,29 @@ body.finish-celebration-active .score {
         });
         // A part wider than this is an Atlantic wrap, not the Pacific mesh.
         if (maxLng - minLng > 60) return;
-        layer.addLayer(L.polyline(part, {
-          pane: "islandClusterPane",
-          className: "island-cluster-outline",
-          color: ISLAND_REGION_STROKE,
-          weight: 1.25,
-          opacity: 0.7,
-          dashArray: "2 3",
-          interactive: false,
-          bubblingMouseEvents: false,
+        pixelLines.push(part.map(([lat, lng]) => {
+          const point = map.latLngToLayerPoint([lat, lng]);
+          return { x: point.x, y: point.y };
         }));
       });
+    });
+    joinSafePolylines(pixelLines, 1.25).forEach((line) => {
+      const part = line.map((point) => {
+        const latLng = map.layerPointToLatLng([point.x, point.y]);
+        return [latLng.lat, latLng.lng];
+      });
+      layer.addLayer(L.polyline(part, {
+        pane: "islandClusterPane",
+        className: "island-cluster-outline",
+        color: ISLAND_REGION_STROKE,
+        weight: 1.25,
+        opacity: 1,
+        dashArray: "2 3",
+        lineCap: "butt",
+        lineJoin: "miter",
+        interactive: false,
+        bubblingMouseEvents: false,
+      }));
     });
     layer.addTo(map);
     mainMapClusterOutlineLayer = layer;
@@ -5168,70 +5597,122 @@ body.finish-celebration-active .score {
       return { x: regionItem.cx, y: regionItem.cy, r: Math.max(dotR, (shortSide * scale) / 2) };
     }
 
+    /**
+     * One uniform scale of the stored lat/lng plot (the Pacific frame projection),
+     * north up, centered on that plot. Equal steps along the diagonal and a
+     * circle pack both erase the chain. The radius shrinks until the closest
+     * pair — Kahoolawe and Maui — clears and every circle stays in the loop.
+     */
     function spreadHawaii(members, ring) {
-      const ordered = members.slice().sort((a, b) => a.lng - b.lng || b.lat - a.lat);
-      const origin = ordered.reduce((sum, dot) => [sum[0] + dot.ox, sum[1] + dot.oy], [0, 0]);
-      origin[0] /= ordered.length;
-      origin[1] /= ordered.length;
-      const tail = ordered[ordered.length - 1];
-      const head = ordered[0];
-      let dx = tail.ox - head.ox;
-      let dy = tail.oy - head.oy;
-      const span = Math.hypot(dx, dy) || 1;
-      dx /= span;
-      dy /= span;
-      const sideX = -dy;
-      const sideY = dx;
-      let radius = dotR;
-      const layout = (useRadius) => {
-        const step = useRadius * 2 + gap;
-        return ordered.map((dot, index) => {
-          const t = index - (ordered.length - 1) / 2;
-          return {
-            dot,
-            x: origin[0] + dx * t * step,
-            y: origin[1] + dy * t * step,
-          };
-        });
-      };
-      const inside = (x, y, useRadius) => {
+      const clearance = 0.6;
+      const rim = 0.3;
+      if (!members.length) return;
+      const origin = members.reduce((sum, dot) => [sum[0] + dot.ox, sum[1] + dot.oy], [0, 0]);
+      origin[0] /= members.length;
+      origin[1] /= members.length;
+      const local = members.map((dot) => ({
+        dot,
+        dx: dot.ox - origin[0],
+        dy: dot.oy - origin[1],
+      }));
+      let minD = Infinity;
+      for (let i = 0; i < local.length; i += 1) {
+        for (let j = i + 1; j < local.length; j += 1) {
+          minD = Math.min(minD, Math.hypot(local[i].dx - local[j].dx, local[i].dy - local[j].dy));
+        }
+      }
+      if (!Number.isFinite(minD) || minD < 1e-3) minD = 1;
+      let ringMinX = Infinity;
+      let ringMaxX = -Infinity;
+      let ringMinY = Infinity;
+      let ringMaxY = -Infinity;
+      ring.pts.forEach((point) => {
+        if (point[0] < ringMinX) ringMinX = point[0];
+        if (point[0] > ringMaxX) ringMaxX = point[0];
+        if (point[1] < ringMinY) ringMinY = point[1];
+        if (point[1] > ringMaxY) ringMaxY = point[1];
+      });
+      const circleInside = (x, y, radius) => {
+        const margin = radius + rim;
+        if (x - margin < ringMinX || x + margin > ringMaxX || y - margin < ringMinY || y + margin > ringMaxY) {
+          return false;
+        }
         if (!pixelInsideRing(x, y, ring.pts)) return false;
         for (let turn = 0; turn < 8; turn += 1) {
           const angle = (Math.PI * 2 * turn) / 8;
-          const px = x + Math.cos(angle) * (useRadius + 0.4);
-          const py = y + Math.sin(angle) * (useRadius + 0.4);
-          if (!pixelInsideRing(px, py, ring.pts)) return false;
+          if (!pixelInsideRing(x + Math.cos(angle) * margin, y + Math.sin(angle) * margin, ring.pts)) return false;
         }
         return true;
       };
-      let placed = layout(radius);
-      for (let attempt = 0; attempt < 8; attempt += 1) {
-        placed = layout(radius);
-        const kah = placed.find((item) => item.dot.entry.displayName === "Kahoolawe");
-        const maui = placed.find((item) => item.dot.entry.displayName === "Maui");
-        if (kah && maui) {
-          kah.x += sideX * (radius * 0.85);
-          kah.y += sideY * (radius * 0.85);
-          if (kah.x >= maui.x) kah.x = maui.x - (radius + 0.6);
-          if (kah.y <= maui.y) kah.y = maui.y + (radius + 0.6);
-        }
-        const fits = placed.every((item) => inside(item.x, item.y, radius));
-        const clear = placed.every((item, index) => placed.every((other, otherIndex) => {
-          if (otherIndex <= index) return true;
-          return Math.hypot(item.x - other.x, item.y - other.y) >= radius * 2 + gap - 0.05;
-        }));
-        if (fits && clear) break;
-        radius = Math.max(1.35, radius - 0.18);
-      }
-      placed.forEach((item) => {
-        if (!inside(item.x, item.y, radius)) {
-          const [cx, cy] = [ring.cx, ring.cy];
-          for (let step = 0; step < 10; step += 1) {
-            item.x = item.x * 0.82 + cx * 0.18;
-            item.y = item.y * 0.82 + cy * 0.18;
-            if (pixelInsideRing(item.x, item.y, ring.pts)) break;
+      const placeAt = (scale, sx, sy) => local.map((item) => ({
+        dot: item.dot,
+        x: origin[0] + item.dx * scale + sx,
+        y: origin[1] + item.dy * scale + sy,
+      }));
+      const separated = (placed, radius) => {
+        const need = radius * 2 + clearance;
+        for (let i = 0; i < placed.length; i += 1) {
+          for (let j = i + 1; j < placed.length; j += 1) {
+            if (Math.hypot(placed[i].x - placed[j].x, placed[i].y - placed[j].y) < need - 0.02) return false;
           }
         }
+        return true;
+      };
+      const findShift = (scale, radius) => {
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        local.forEach((item) => {
+          const x = origin[0] + item.dx * scale;
+          const y = origin[1] + item.dy * scale;
+          const margin = radius + rim;
+          if (x - margin < minX) minX = x - margin;
+          if (x + margin > maxX) maxX = x + margin;
+          if (y - margin < minY) minY = y - margin;
+          if (y + margin > maxY) maxY = y + margin;
+        });
+        const sxLo = Math.ceil(ringMinX - minX);
+        const sxHi = Math.floor(ringMaxX - maxX);
+        const syLo = Math.ceil(ringMinY - minY);
+        const syHi = Math.floor(ringMaxY - maxY);
+        if (sxLo > sxHi || syLo > syHi) return null;
+        let best = null;
+        for (let sx = sxLo; sx <= sxHi; sx += 1) {
+          for (let sy = syLo; sy <= syHi; sy += 1) {
+            const drift = Math.hypot(sx, sy);
+            if (best && drift >= best.drift) continue;
+            const placed = placeAt(scale, sx, sy);
+            if (!placed.every((item) => circleInside(item.x, item.y, radius))) continue;
+            if (!separated(placed, radius)) continue;
+            best = { placed, drift };
+          }
+        }
+        return best;
+      };
+      let chosen = null;
+      for (let radius = dotR; radius >= 0.7; radius -= 0.05) {
+        const scaleMin = (radius * 2 + clearance) / minD;
+        let fit = findShift(scaleMin, radius);
+        if (!fit) continue;
+        let low = scaleMin;
+        let high = scaleMin + 2.5;
+        if (!findShift(high, radius)) {
+          for (let step = 0; step < 8; step += 1) {
+            const mid = (low + high) / 2;
+            if (findShift(mid, radius)) low = mid;
+            else high = mid;
+          }
+        } else {
+          low = high;
+        }
+        fit = findShift(low, radius) || fit;
+        chosen = { radius, placed: fit.placed };
+        break;
+      }
+      const placed = chosen ? chosen.placed : placeAt(1, 0, 0);
+      const radius = chosen ? chosen.radius : 0.7;
+      placed.forEach((item) => {
         item.dot.x = item.x;
         item.dot.y = item.y;
         item.dot.r = radius;
