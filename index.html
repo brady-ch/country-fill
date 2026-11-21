@@ -1207,6 +1207,11 @@ body.finish-celebration-active .score {
   stroke-width: 0.9;
 }
 
+.inset-map__view svg circle.inset-region-mark {
+  pointer-events: none;
+  cursor: default;
+}
+
 .inset-item.inset-item--filled,
 .inset-shape.inset-item--filled,
 .inset-reference.inset-item--filled {
@@ -2610,15 +2615,17 @@ body.finish-celebration-active .score {
           placed[j].y += Math.sin(angle) * 0.25;
         }
       }
+      const gap = 2;
+      const minDist = diameter + gap;
       const radius = diameter / 2;
-      for (let iter = 0; iter < 90; iter += 1) {
+      for (let iter = 0; iter < 120; iter += 1) {
         for (let i = 0; i < placed.length; i += 1) {
           for (let j = i + 1; j < placed.length; j += 1) {
             let dx = placed[j].x - placed[i].x;
             let dy = placed[j].y - placed[i].y;
             const dist = Math.hypot(dx, dy) || 0.01;
-            if (dist >= diameter) continue;
-            const push = (diameter - dist) / 2;
+            if (dist >= minDist) continue;
+            const push = (minDist - dist) / 2;
             dx /= dist;
             dy /= dist;
             placed[i].x -= dx * push;
@@ -2632,7 +2639,7 @@ body.finish-celebration-active .score {
             let dx = dot.x - obstacle.x;
             let dy = dot.y - obstacle.y;
             const dist = Math.hypot(dx, dy) || 0.01;
-            const need = obstacle.r + radius;
+            const need = obstacle.r + radius + gap / 2;
             if (dist >= need) return;
             const push = need - dist;
             dx /= dist;
@@ -2654,13 +2661,13 @@ body.finish-celebration-active .score {
       let separated = true;
       for (let i = 0; i < placed.length; i += 1) {
         for (let j = i + 1; j < placed.length; j += 1) {
-          if (Math.hypot(placed[i].x - placed[j].x, placed[i].y - placed[j].y) < diameter - 0.05) {
+          if (Math.hypot(placed[i].x - placed[j].x, placed[i].y - placed[j].y) < minDist - 0.05) {
             separated = false;
           }
         }
         obstacles.forEach((obstacle) => {
           const dist = Math.hypot(placed[i].x - obstacle.x, placed[i].y - obstacle.y);
-          if (dist < obstacle.r + radius - 0.05) separated = false;
+          if (dist < obstacle.r + radius + gap / 2 - 0.05) separated = false;
         });
       }
       return { placed, separated };
@@ -2734,7 +2741,7 @@ body.finish-celebration-active .score {
       };
       for (let i = 0; i < dots.length; i += 1) {
         for (let j = i + 1; j < dots.length; j += 1) {
-          if (Math.hypot(dots[i].ox - dots[j].ox, dots[i].oy - dots[j].oy) < MAIN_DOT_PX) unite(i, j);
+          if (Math.hypot(dots[i].ox - dots[j].ox, dots[i].oy - dots[j].oy) < MAIN_DOT_PX + 2) unite(i, j);
         }
         obstacles.forEach((obstacle) => {
           const reach = obstacle.r + MAIN_DOT_PX / 2;
@@ -2761,18 +2768,112 @@ body.finish-celebration-active .score {
       clusters.sort((a, b) => Number(b.priority) - Number(a.priority) || b.members.length - a.members.length);
 
       clusters.forEach((cluster) => {
-        const sizes = cluster.priority ? [4, 3] : [6, 5, 4];
-        const maxDrift = cluster.priority ? 28 : 18;
+        const sizes = cluster.priority ? [5, 4, 3] : [8, 6, 5, 4];
+        const drifts = cluster.priority ? [14, 22, 32] : [10, 16, 24];
         let applied = null;
         for (const size of sizes) {
-          const trial = relax(cluster.members, cluster.obstacles, size, maxDrift);
-          applied = { size, placed: trial.placed, separated: trial.separated };
-          if (trial.separated) break;
+          for (const maxDrift of drifts) {
+            const trial = relax(cluster.members, cluster.obstacles, size, maxDrift);
+            applied = { size, placed: trial.placed, separated: trial.separated };
+            if (trial.separated) break;
+          }
+          if (applied && applied.separated) break;
         }
         applied.placed.forEach((dot) => {
           const ll = map.containerPointToLatLng([dot.x, dot.y]);
           addIslandMarker(dot.entry, ll.lat, ll.lng, applied.size);
         });
+      });
+
+      const live = [];
+      entries.forEach((entry) => {
+        if (!entry.marker || !entry.dotHome) return;
+        const pt = map.latLngToContainerPoint(entry.marker.getLatLng());
+        const home = map.latLngToContainerPoint(entry.dotHome);
+        const el = entry.marker.getElement()?.querySelector(".island-marker__dot");
+        const size = el ? parseFloat(el.style.width) || MAIN_DOT_PX : MAIN_DOT_PX;
+        live.push({
+          entry,
+          x: pt.x,
+          y: pt.y,
+          ax: pt.x,
+          ay: pt.y,
+          hx: home.x,
+          hy: home.y,
+          size,
+        });
+      });
+      const edgeGap = 2;
+      const mapSize = map.getSize();
+      const stillOverlapping = () => {
+        for (let i = 0; i < live.length; i += 1) {
+          for (let j = i + 1; j < live.length; j += 1) {
+            const need = (live[i].size + live[j].size) / 2 + edgeGap;
+            if (Math.hypot(live[i].x - live[j].x, live[i].y - live[j].y) < need - 0.05) return true;
+          }
+        }
+        return false;
+      };
+      for (let pass = 0; pass < 4 && stillOverlapping(); pass += 1) {
+        const allowance = 8 + pass * 6;
+        for (let iter = 0; iter < 80; iter += 1) {
+          for (let i = 0; i < live.length; i += 1) {
+            for (let j = i + 1; j < live.length; j += 1) {
+              const a = live[i];
+              const b = live[j];
+              let dx = b.x - a.x;
+              let dy = b.y - a.y;
+              const dist = Math.hypot(dx, dy) || 0.01;
+              const need = (a.size + b.size) / 2 + edgeGap;
+              if (dist >= need) continue;
+              const push = (need - dist) / 2;
+              dx /= dist;
+              dy /= dist;
+              a.x -= dx * push;
+              a.y -= dy * push;
+              b.x += dx * push;
+              b.y += dy * push;
+            }
+          }
+          live.forEach((dot) => {
+            const dx = dot.x - dot.ax;
+            const dy = dot.y - dot.ay;
+            const drift = Math.hypot(dx, dy);
+            if (drift > allowance) {
+              dot.x = dot.ax + (dx / drift) * allowance;
+              dot.y = dot.ay + (dy / drift) * allowance;
+            }
+            const homeDrift = Math.hypot(dot.x - dot.hx, dot.y - dot.hy);
+            const homeCap = 40;
+            if (homeDrift > homeCap) {
+              dot.x = dot.hx + ((dot.x - dot.hx) / homeDrift) * homeCap;
+              dot.y = dot.hy + ((dot.y - dot.hy) / homeDrift) * homeCap;
+            }
+            const pad = dot.size / 2 + 1;
+            dot.x = Math.max(pad, Math.min(mapSize.x - pad, dot.x));
+            dot.y = Math.max(pad, Math.min(mapSize.y - pad, dot.y));
+          });
+        }
+        if (!stillOverlapping()) break;
+        const crowded = new Set();
+        for (let i = 0; i < live.length; i += 1) {
+          for (let j = i + 1; j < live.length; j += 1) {
+            const need = (live[i].size + live[j].size) / 2 + edgeGap;
+            if (Math.hypot(live[i].x - live[j].x, live[i].y - live[j].y) < need - 0.05) {
+              crowded.add(live[i]);
+              crowded.add(live[j]);
+            }
+          }
+        }
+        crowded.forEach((dot) => {
+          if (dot.size > 3) dot.size -= 1;
+          dot.x = dot.ax;
+          dot.y = dot.ay;
+        });
+      }
+      live.forEach((dot) => {
+        const ll = map.containerPointToLatLng([dot.x, dot.y]);
+        addIslandMarker(dot.entry, ll.lat, ll.lng, dot.size);
       });
     }
 
@@ -4449,15 +4550,16 @@ body.finish-celebration-active .score {
     bindInsetShapeClick(shape, entry);
   }
 
-  function appendInsetDot(svg, entry, x, y, visualR) {
+  function appendInsetDot(svg, entry, x, y, visualR, hitR) {
     const cx = x.toFixed(2);
     const cy = y.toFixed(2);
-    if (visualR < INSET_DOT_HIT_R) {
+    const hitRadius = hitR == null ? INSET_DOT_HIT_R : hitR;
+    if (visualR < hitRadius) {
       const hit = document.createElementNS(SVG_NS, "circle");
       hit.setAttribute("class", "inset-shape inset-shape--dot-hit");
       hit.setAttribute("cx", cx);
       hit.setAttribute("cy", cy);
-      hit.setAttribute("r", String(INSET_DOT_HIT_R));
+      hit.setAttribute("r", hitRadius.toFixed(2));
       hit.setAttribute("aria-hidden", "true");
       bindInsetShapeClick(hit, entry);
       svg.appendChild(hit);
@@ -4467,7 +4569,7 @@ body.finish-celebration-active .score {
     circle.setAttribute("cy", cy);
     circle.setAttribute("r", visualR.toFixed(2));
     circle.setAttribute("aria-hidden", "true");
-    const dotClasses = visualR < INSET_DOT_HIT_R
+    const dotClasses = visualR < hitRadius
       ? "inset-item inset-shape inset-shape--dot inset-shape--dot-visual"
       : "inset-item inset-shape inset-shape--dot";
     circle.setAttribute("class", dotClasses);
@@ -4821,9 +4923,9 @@ body.finish-celebration-active .score {
   }
 
   function separateDots(dots) {
-    const maxDrift = 14;
-    const gap = 1.2;
-    for (let iter = 0; iter < 36; iter += 1) {
+    const maxDrift = 22;
+    const gap = 1.4;
+    for (let iter = 0; iter < 80; iter += 1) {
       for (let i = 0; i < dots.length; i += 1) {
         for (let j = i + 1; j < dots.length; j += 1) {
           const a = dots[i];
@@ -4920,6 +5022,290 @@ body.finish-celebration-active .score {
     svg.appendChild(group);
   }
 
+  function projectedRingArea(pts) {
+    let area = 0;
+    for (let i = 0; i < pts.length; i += 1) {
+      const next = pts[(i + 1) % pts.length];
+      area += pts[i][0] * next[1] - next[0] * pts[i][1];
+    }
+    return Math.abs(area) / 2;
+  }
+
+  function pixelRingCentroid(pts) {
+    let area = 0;
+    let cx = 0;
+    let cy = 0;
+    for (let i = 0; i < pts.length; i += 1) {
+      const next = pts[(i + 1) % pts.length];
+      const cross = pts[i][0] * next[1] - next[0] * pts[i][1];
+      area += cross;
+      cx += (pts[i][0] + next[0]) * cross;
+      cy += (pts[i][1] + next[1]) * cross;
+    }
+    if (Math.abs(area) < 1e-6) {
+      const mean = pts.reduce((sum, point) => [sum[0] + point[0], sum[1] + point[1]], [0, 0]);
+      return [mean[0] / pts.length, mean[1] / pts.length];
+    }
+    return [cx / (3 * area), cy / (3 * area)];
+  }
+
+  function pixelInsideRing(x, y, pts) {
+    return pointInRing(y, x, pts);
+  }
+
+  function isPacificOutlier(entry) {
+    return HAWAII_CHAIN_IDS.has(entry.id)
+      || entry.displayName === "Tahiti"
+      || entry.displayName === "Bora Bora";
+  }
+
+  /**
+   * One mark at each Pacific region center. Tahiti, Bora Bora, and the eight
+   * Hawaiian islands stay as their own dots and keep their Seterra names.
+   */
+  function drawPacificCenteredMarks(svg, frame, project, view, shared, pathsByCode, region) {
+    const regions = region.strokes.map((stroke, index) => {
+      const count = ringVertexCount(stroke);
+      const pts = [];
+      for (let i = 0; i < count; i += 1) {
+        const point = project(frameLng(stroke[i][1], frame), stroke[i][0]);
+        pts.push([point.x, point.y]);
+      }
+      const [cx, cy] = pixelRingCentroid(pts);
+      return {
+        index,
+        pts,
+        area: projectedRingArea(pts),
+        cx,
+        cy,
+        hawaii: false,
+        members: [],
+      };
+    }).filter((item) => item.pts.length >= 3 && item.area > 1);
+    let hawaii = null;
+    regions.forEach((item) => {
+      if (!hawaii || item.pts.length > hawaii.pts.length) hawaii = item;
+    });
+    if (hawaii && hawaii.pts.length > 40) hawaii.hawaii = true;
+
+    entries.forEach((entry) => {
+      if (!entry.needsInset || !entryInFrame(entry, frame)) return;
+      const ll = insetLatLng(entry);
+      if (!ll) return;
+      const point = project(frameLng(ll[1], frame), ll[0]);
+      let best = null;
+      regions.forEach((item) => {
+        if (!pixelInsideRing(point.x, point.y, item.pts)) return;
+        if (!best || item.area < best.area) best = item;
+      });
+      const member = {
+        entry,
+        x: point.x,
+        y: point.y,
+        ox: point.x,
+        oy: point.y,
+        lat: ll[0],
+        lng: pacificLng(ll[1]),
+        outlier: isPacificOutlier(entry),
+      };
+      if (best) best.members.push(member);
+    });
+
+    const gap = 1.1;
+    const dotR = 2.4;
+
+    function readablePath(entry) {
+      if (!entry.mapCode || (shared.get(entry.mapCode) || 0) !== 1) return null;
+      const drawn = pathsByCode.get(entry.mapCode);
+      if (!drawn) return null;
+      if (Math.min(drawn.box.w, drawn.box.h) < 8) return null;
+      return drawn.path;
+    }
+
+    function bindMark(shape, members) {
+      const ordered = members.slice().sort((a, b) => a.entry.displayName.localeCompare(b.entry.displayName, "en"));
+      ordered.forEach((member) => {
+        rememberInsetShape(member.entry, shape, true);
+      });
+      const primary = ordered[0].entry;
+      shape.dataset.countryId = primary.id;
+      primary.insetEl = shape;
+    }
+
+    function addCenterDot(regionItem, members) {
+      const circle = document.createElementNS(SVG_NS, "circle");
+      circle.setAttribute("cx", regionItem.cx.toFixed(2));
+      circle.setAttribute("cy", regionItem.cy.toFixed(2));
+      circle.setAttribute("r", dotR.toFixed(2));
+      circle.dataset.regionMark = "center";
+      if (!members.length) {
+        circle.setAttribute("class", "inset-shape inset-shape--dot inset-region-mark");
+        svg.appendChild(circle);
+        return { x: regionItem.cx, y: regionItem.cy, r: dotR };
+      }
+      circle.setAttribute("class", "inset-item inset-shape inset-shape--dot");
+      bindMark(circle, members);
+      svg.appendChild(circle);
+      return { x: regionItem.cx, y: regionItem.cy, r: dotR };
+    }
+
+    function addCenteredCountry(regionItem, path, members) {
+      const box = path.getBBox();
+      const dx = regionItem.cx - (box.x + box.width / 2);
+      const dy = regionItem.cy - (box.y + box.height / 2);
+      const shortSide = Math.min(box.width, box.height) || 1;
+      const regionShort = Math.min(
+        ...regionItem.pts.map((point) => Math.hypot(point[0] - regionItem.cx, point[1] - regionItem.cy)),
+      ) * 1.4;
+      let scale = 1;
+      if (shortSide > regionShort && regionShort > 8) scale = regionShort / shortSide;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      path.setAttribute("transform", `translate(${regionItem.cx.toFixed(2)} ${regionItem.cy.toFixed(2)}) scale(${scale.toFixed(3)}) translate(${(-cx).toFixed(2)} ${(-cy).toFixed(2)})`);
+      path.dataset.regionMark = "center";
+      path.classList.add("inset-item", "inset-shape");
+      bindMark(path, members);
+      return { x: regionItem.cx, y: regionItem.cy, r: Math.max(dotR, (shortSide * scale) / 2) };
+    }
+
+    function spreadHawaii(members, ring) {
+      const ordered = members.slice().sort((a, b) => a.lng - b.lng || b.lat - a.lat);
+      const origin = ordered.reduce((sum, dot) => [sum[0] + dot.ox, sum[1] + dot.oy], [0, 0]);
+      origin[0] /= ordered.length;
+      origin[1] /= ordered.length;
+      const tail = ordered[ordered.length - 1];
+      const head = ordered[0];
+      let dx = tail.ox - head.ox;
+      let dy = tail.oy - head.oy;
+      const span = Math.hypot(dx, dy) || 1;
+      dx /= span;
+      dy /= span;
+      const sideX = -dy;
+      const sideY = dx;
+      let radius = dotR;
+      const layout = (useRadius) => {
+        const step = useRadius * 2 + gap;
+        return ordered.map((dot, index) => {
+          const t = index - (ordered.length - 1) / 2;
+          return {
+            dot,
+            x: origin[0] + dx * t * step,
+            y: origin[1] + dy * t * step,
+          };
+        });
+      };
+      const inside = (x, y, useRadius) => {
+        if (!pixelInsideRing(x, y, ring.pts)) return false;
+        for (let turn = 0; turn < 8; turn += 1) {
+          const angle = (Math.PI * 2 * turn) / 8;
+          const px = x + Math.cos(angle) * (useRadius + 0.4);
+          const py = y + Math.sin(angle) * (useRadius + 0.4);
+          if (!pixelInsideRing(px, py, ring.pts)) return false;
+        }
+        return true;
+      };
+      let placed = layout(radius);
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        placed = layout(radius);
+        const kah = placed.find((item) => item.dot.entry.displayName === "Kahoolawe");
+        const maui = placed.find((item) => item.dot.entry.displayName === "Maui");
+        if (kah && maui) {
+          kah.x += sideX * (radius * 0.85);
+          kah.y += sideY * (radius * 0.85);
+          if (kah.x >= maui.x) kah.x = maui.x - (radius + 0.6);
+          if (kah.y <= maui.y) kah.y = maui.y + (radius + 0.6);
+        }
+        const fits = placed.every((item) => inside(item.x, item.y, radius));
+        const clear = placed.every((item, index) => placed.every((other, otherIndex) => {
+          if (otherIndex <= index) return true;
+          return Math.hypot(item.x - other.x, item.y - other.y) >= radius * 2 + gap - 0.05;
+        }));
+        if (fits && clear) break;
+        radius = Math.max(1.35, radius - 0.18);
+      }
+      placed.forEach((item) => {
+        if (!inside(item.x, item.y, radius)) {
+          const [cx, cy] = [ring.cx, ring.cy];
+          for (let step = 0; step < 10; step += 1) {
+            item.x = item.x * 0.82 + cx * 0.18;
+            item.y = item.y * 0.82 + cy * 0.18;
+            if (pixelInsideRing(item.x, item.y, ring.pts)) break;
+          }
+        }
+        item.dot.x = item.x;
+        item.dot.y = item.y;
+        item.dot.r = radius;
+      });
+    }
+
+    function nudgeOutliers(dots, blocks, ring) {
+      const radius = dots[0]?.r || dotR;
+      for (let iter = 0; iter < 40; iter += 1) {
+        for (let i = 0; i < dots.length; i += 1) {
+          for (let j = i + 1; j < dots.length; j += 1) {
+            const a = dots[i];
+            const b = dots[j];
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            const dist = Math.hypot(dx, dy) || 0.01;
+            const need = (a.r || radius) + (b.r || radius) + gap;
+            if (dist >= need) continue;
+            const push = (need - dist) / 2;
+            dx /= dist;
+            dy /= dist;
+            a.x -= dx * push;
+            a.y -= dy * push;
+            b.x += dx * push;
+            b.y += dy * push;
+          }
+        }
+        dots.forEach((dot) => {
+          blocks.forEach((block) => {
+            let dx = dot.x - block.x;
+            let dy = dot.y - block.y;
+            const dist = Math.hypot(dx, dy) || 0.01;
+            const need = (dot.r || radius) + block.r + gap;
+            if (dist >= need) return;
+            const push = need - dist;
+            dx /= dist;
+            dy /= dist;
+            dot.x += dx * push;
+            dot.y += dy * push;
+          });
+          if (ring && !pixelInsideRing(dot.x, dot.y, ring.pts)) {
+            dot.x = dot.x * 0.75 + ring.cx * 0.25;
+            dot.y = dot.y * 0.75 + ring.cy * 0.25;
+          }
+        });
+      }
+    }
+
+    regions.forEach((item) => {
+      const outliers = item.members.filter((member) => member.outlier);
+      const collapsed = item.members.filter((member) => !member.outlier);
+      const fixed = [];
+      if (item.hawaii && !collapsed.length) {
+        spreadHawaii(outliers, item);
+      } else if (collapsed.length || !outliers.length) {
+        const readable = collapsed.map((member) => readablePath(member.entry)).filter(Boolean);
+        const uniquePaths = [...new Set(readable)];
+        if (uniquePaths.length === 1) {
+          fixed.push(addCenteredCountry(item, uniquePaths[0], collapsed));
+        } else {
+          fixed.push(addCenterDot(item, collapsed));
+        }
+        if (outliers.length) nudgeOutliers(outliers, fixed, item);
+      }
+      outliers.forEach((dot) => {
+        const radius = dot.r || dotR;
+        appendInsetDot(svg, dot.entry, dot.x, dot.y, radius, radius);
+      });
+    });
+    if (view) {
+      svg.dataset.pacificMarks = "centered";
+    }
+  }
+
   function buildInsetSvg(spec, shared) {
     const region = spec.id === "pacific" ? islandRegions() : null;
     const frame = region && region.frame ? region.frame : spec.bounds;
@@ -4957,36 +5343,37 @@ body.finish-celebration-active .score {
     });
 
     const skipIds = new Set(sub ? sub.ids : []);
-    const dots = [];
-    const fixedDots = [];
-    entries.forEach((entry) => {
-      if (skipIds.has(entry.id)) return;
-      if (!entry.needsInset || !entryInFrame(entry, frame)) return;
-      const drawn = entry.mapCode ? pathsByCode.get(entry.mapCode) : null;
-      const shortSide = drawn ? Math.min(drawn.box.w, drawn.box.h) : 0;
-      if (drawn && (shared.get(entry.mapCode) || 0) === 1 && shortSide >= 8) {
-        rememberInsetShape(entry, drawn.path, true);
-        return;
-      }
-      const ll = insetLatLng(entry);
-      if (!ll) return;
-      const point = project(frameLng(ll[1], frame), ll[0]);
-      const dot = {
-        entry,
-        x: point.x,
-        y: point.y,
-        ox: point.x,
-        oy: point.y,
-        r: 2.4,
-        view: mapView,
-      };
-      if (spec.id === "pacific" && HAWAII_CHAIN_IDS.has(entry.id)) fixedDots.push(dot);
-      else dots.push(dot);
-    });
-    separateDots(dots);
-    dots.concat(fixedDots).forEach((dot) => {
-      appendInsetDot(svg, dot.entry, dot.x, dot.y, dot.r);
-    });
+    if (spec.id === "pacific" && region && region.kept) {
+      drawPacificCenteredMarks(svg, frame, project, mapView, shared, pathsByCode, region);
+    } else {
+      const dots = [];
+      entries.forEach((entry) => {
+        if (skipIds.has(entry.id)) return;
+        if (!entry.needsInset || !entryInFrame(entry, frame)) return;
+        const drawn = entry.mapCode ? pathsByCode.get(entry.mapCode) : null;
+        const shortSide = drawn ? Math.min(drawn.box.w, drawn.box.h) : 0;
+        if (drawn && (shared.get(entry.mapCode) || 0) === 1 && shortSide >= 8) {
+          rememberInsetShape(entry, drawn.path, true);
+          return;
+        }
+        const ll = insetLatLng(entry);
+        if (!ll) return;
+        const point = project(frameLng(ll[1], frame), ll[0]);
+        dots.push({
+          entry,
+          x: point.x,
+          y: point.y,
+          ox: point.x,
+          oy: point.y,
+          r: 2.4,
+          view: mapView,
+        });
+      });
+      separateDots(dots);
+      dots.forEach((dot) => {
+        appendInsetDot(svg, dot.entry, dot.x, dot.y, dot.r);
+      });
+    }
     if (spec.id === "pacific") drawInsetIslandRings(svg, "pacific", project, frame);
     if (sub) {
       drawInsetSubframe(svg, sub, {
