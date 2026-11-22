@@ -1418,12 +1418,12 @@ body.finish-celebration-active .score {
 .island-marker__dot {
   display: block;
   box-sizing: border-box;
-  width: 8px;
-  height: 8px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--cf-island-unfilled);
   border: 1px solid var(--cf-island-unfilled-stroke);
-  box-shadow: 0 0 0 1px #fff;
+  box-shadow: none;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
@@ -1697,6 +1697,14 @@ body.finish-celebration-active .score {
   const WORLD_NORTH = 72.5;
   const WORLD_WEST = -180;
   const WORLD_EAST = 180;
+  /**
+   * Open view is one world wide, centered on the Pacific. Longitudes west of
+   * this Atlantic cut are drawn once at +360, so Alaska and the Pacific
+   * islands continue to the right of the date line instead of across the map.
+   */
+  const VIEW_SPLIT_LNG = -25;
+  const VIEW_CENTER_LNG = 160;
+  const VIEW_NORTH = 64;
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   let unfilledStyle = {};
@@ -2407,13 +2415,52 @@ body.finish-celebration-active .score {
     });
   }
 
-  const MAIN_DOT_PX = 8;
+  const MAIN_DOT_PX = 5;
+
+  function viewLng(lng) {
+    return lng < VIEW_SPLIT_LNG ? lng + 360 : lng;
+  }
+
+  /** One ring in view longitude. A dateline ring unwraps; other western rings shift together. */
+  function displayRing(ring) {
+    let min = Infinity;
+    let max = -Infinity;
+    let sum = 0;
+    ring.forEach(([lng]) => {
+      if (lng < min) min = lng;
+      if (lng > max) max = lng;
+      sum += lng;
+    });
+    const mean = ring.length ? sum / ring.length : 0;
+    const dateline = max - min > 180;
+    const shift = !dateline && mean < VIEW_SPLIT_LNG;
+    return ring.map(([lng, lat]) => {
+      let x = lng;
+      if ((dateline && x < 0) || shift) x += 360;
+      return [x, lat];
+    });
+  }
+
+  function displayGeometry(geometry) {
+    if (!geometry) return geometry;
+    const shiftRings = (rings) => rings.map((ring) => displayRing(ring));
+    if (geometry.type === "Polygon") {
+      return { type: "Polygon", coordinates: shiftRings(geometry.coordinates) };
+    }
+    if (geometry.type === "MultiPolygon") {
+      return {
+        type: "MultiPolygon",
+        coordinates: geometry.coordinates.map((poly) => shiftRings(poly)),
+      };
+    }
+    return geometry;
+  }
 
   function visibleMarkerLatLng(lat, lng) {
     const edge = 0.9;
     return [
       Math.min(WORLD_NORTH - edge, Math.max(WORLD_SOUTH + edge, lat)),
-      lng,
+      viewLng(lng),
     ];
   }
 
@@ -2588,7 +2635,8 @@ body.finish-celebration-active .score {
     const latLng = resolveMarkerLatLng(entry);
     if (!latLng) return false;
     // A stored point is the place, even when it sits inside a host country.
-    if (entry.point) return true;
+    // French Guiana has no stored point and no polygon; its anchor is the mark.
+    if (entry.point || INSET_ANCHORS[entry.id]) return true;
     if (isInteriorPoint(latLng[0], latLng[1], entry.mapCode)) return false;
     return true;
   }
@@ -2625,7 +2673,9 @@ body.finish-celebration-active .score {
           placed[j].y += Math.sin(angle) * 0.25;
         }
       }
-      const gap = 2;
+      // One pixel of slack so integer marker positions still do not overlap.
+      // A pair may still touch after that rounding.
+      const gap = 1;
       const minDist = diameter + gap;
       const radius = diameter / 2;
       for (let iter = 0; iter < 120; iter += 1) {
@@ -2715,7 +2765,7 @@ body.finish-celebration-active .score {
         }
         entry.dotHome = [latLng[0], latLng[1]];
         addIslandMarker(entry, latLng[0], latLng[1], MAIN_DOT_PX);
-        const home = map.latLngToContainerPoint(latLng);
+        const home = map.latLngToContainerPoint([latLng[0], viewLng(latLng[1])]);
         dots.push({
           entry,
           ox: home.x,
@@ -2751,7 +2801,7 @@ body.finish-celebration-active .score {
       };
       for (let i = 0; i < dots.length; i += 1) {
         for (let j = i + 1; j < dots.length; j += 1) {
-          if (Math.hypot(dots[i].ox - dots[j].ox, dots[i].oy - dots[j].oy) < MAIN_DOT_PX + 2) unite(i, j);
+          if (Math.hypot(dots[i].ox - dots[j].ox, dots[i].oy - dots[j].oy) < MAIN_DOT_PX) unite(i, j);
         }
         obstacles.forEach((obstacle) => {
           const reach = obstacle.r + MAIN_DOT_PX / 2;
@@ -2778,7 +2828,7 @@ body.finish-celebration-active .score {
       clusters.sort((a, b) => Number(b.priority) - Number(a.priority) || b.members.length - a.members.length);
 
       clusters.forEach((cluster) => {
-        const sizes = cluster.priority ? [5, 4, 3] : [8, 6, 5, 4];
+        const sizes = cluster.priority ? [4, 3] : [5, 4, 3];
         const drifts = cluster.priority ? [14, 22, 32] : [10, 16, 24];
         let applied = null;
         for (const size of sizes) {
@@ -2799,7 +2849,7 @@ body.finish-celebration-active .score {
       entries.forEach((entry) => {
         if (!entry.marker || !entry.dotHome) return;
         const pt = map.latLngToContainerPoint(entry.marker.getLatLng());
-        const home = map.latLngToContainerPoint(entry.dotHome);
+        const home = map.latLngToContainerPoint([entry.dotHome[0], viewLng(entry.dotHome[1])]);
         const el = entry.marker.getElement()?.querySelector(".island-marker__dot");
         const size = el ? parseFloat(el.style.width) || MAIN_DOT_PX : MAIN_DOT_PX;
         live.push({
@@ -2813,7 +2863,7 @@ body.finish-celebration-active .score {
           size,
         });
       });
-      const edgeGap = 2;
+      const edgeGap = 1;
       const mapSize = map.getSize();
       const stillOverlapping = () => {
         for (let i = 0; i < live.length; i += 1) {
@@ -2881,10 +2931,42 @@ body.finish-celebration-active .score {
           dot.y = dot.ay;
         });
       }
+      // The Balearic region dot is stored on Mallorca, and Akrotiri on Cyprus.
+      // Move only the region mark until the two circles touch.
+      [
+        ["Balearic Islands", "Mallorca"],
+        ["Akrotiri and Dhekelia", "Cyprus"],
+      ].forEach(([regionName, countryName]) => {
+        const region = live.find((dot) => dot.entry.displayName === regionName);
+        const country = live.find((dot) => dot.entry.displayName === countryName);
+        if (!region || !country) return;
+        const need = (region.size + country.size) / 2;
+        const overlaps = (x, y, other) => {
+          const min = (region.size + other.size) / 2;
+          return Math.hypot(x - other.x, y - other.y) < min - 0.05;
+        };
+        let placed = null;
+        for (let step = 0; step < 16 && !placed; step += 1) {
+          const dist = need + step * 0.5;
+          for (let turn = 0; turn < 16; turn += 1) {
+            const angle = (Math.PI * 2 * turn) / 16 + 0.4;
+            const x = country.x + Math.cos(angle) * dist;
+            const y = country.y + Math.sin(angle) * dist;
+            const blocked = live.some((other) => other !== region && overlaps(x, y, other));
+            if (blocked) continue;
+            placed = { x, y };
+            break;
+          }
+        }
+        if (!placed) return;
+        region.x = placed.x;
+        region.y = placed.y;
+      });
       live.forEach((dot) => {
         const ll = map.containerPointToLatLng([dot.x, dot.y]);
         addIslandMarker(dot.entry, ll.lat, ll.lng, dot.size);
       });
+      centerPacificRegionMarks();
     }
 
     const schedule = () => {
@@ -2938,6 +3020,8 @@ body.finish-celebration-active .score {
 
   /** @type {L.LayerGroup|null} */
   let mainMapClusterOutlineLayer = null;
+  /** @type {L.Marker[]} */
+  let emptyFaceMarkers = [];
 
   const ISLAND_REGION_STROKE = "#1d1d1b";
   const ISLAND_REGION_SNAP = 0.8;
@@ -4547,20 +4631,20 @@ body.finish-celebration-active .score {
     const layer = L.layerGroup();
     const pixelLines = [];
     cleanRegionBorderChains(region.strokes).forEach((stroke) => {
-      splitStrokeAtDateline(stroke).forEach((part) => {
-        let minLng = Infinity;
-        let maxLng = -Infinity;
-        part.forEach((point) => {
-          if (point[1] < minLng) minLng = point[1];
-          if (point[1] > maxLng) maxLng = point[1];
-        });
-        // A part wider than this is an Atlantic wrap, not the Pacific mesh.
-        if (maxLng - minLng > 60) return;
-        pixelLines.push(part.map(([lat, lng]) => {
-          const point = map.latLngToLayerPoint([lat, lng]);
-          return { x: point.x, y: point.y };
-        }));
+      const part = stroke.map(([lat, lng]) => [lat, lng < 0 ? lng + 360 : lng]);
+      let minLng = Infinity;
+      let maxLng = -Infinity;
+      part.forEach((point) => {
+        if (point[1] < minLng) minLng = point[1];
+        if (point[1] > maxLng) maxLng = point[1];
       });
+      // The mesh lives east of Australia across the date line. A wide span is
+      // the same outline wrapped back across the Atlantic, so it is not drawn.
+      if (maxLng - minLng > 60 || minLng < 100 || maxLng > 260) return;
+      pixelLines.push(part.map(([lat, lng]) => {
+        const point = map.latLngToLayerPoint([lat, lng]);
+        return { x: point.x, y: point.y };
+      }));
     });
     joinSafePolylines(pixelLines, 1.25).forEach((line) => {
       const part = line.map((point) => {
@@ -4580,8 +4664,262 @@ body.finish-celebration-active .score {
         bubblingMouseEvents: false,
       }));
     });
+    pacificFaces().forEach((face) => {
+      const poly = L.polygon(face.latlngs, {
+        pane: "islandClusterPane",
+        className: "island-region-face",
+        stroke: false,
+        weight: 0,
+        fillColor: "#000000",
+        fillOpacity: 0,
+        interactive: false,
+        bubblingMouseEvents: false,
+      });
+      poly.options.regionFace = String(face.index);
+      layer.addLayer(poly);
+    });
     layer.addTo(map);
+    layer.eachLayer((item) => {
+      if (item.options?.className !== "island-region-face") return;
+      const el = item.getElement?.();
+      if (!el) return;
+      el.dataset.regionFace = item.options.regionFace;
+      el.style.pointerEvents = "none";
+    });
     mainMapClusterOutlineLayer = layer;
+  }
+
+  /**
+   * Closed Pacific faces in layer pixels. The dashed strokes are these rings
+   * with shared edges drawn once; the center used for dots is the ring centroid.
+   */
+  function pacificFaces() {
+    if (!map) return [];
+    const region = islandRegions();
+    if (!region.kept) return [];
+    return cleanRegionStrokes(region.strokes).map((stroke, index) => {
+      const count = ringVertexCount(stroke);
+      const latlngs = [];
+      const pts = [];
+      for (let i = 0; i < count; i += 1) {
+        const lat = stroke[i][0];
+        const lng = stroke[i][1];
+        latlngs.push([lat, lng]);
+        const point = map.latLngToLayerPoint([lat, lng]);
+        pts.push([point.x, point.y]);
+      }
+      const [cx, cy] = pixelRingCentroid(pts);
+      return {
+        index,
+        latlngs,
+        pts,
+        cx,
+        cy,
+        area: projectedRingArea(pts),
+        centroid: map.layerPointToLatLng([cx, cy]),
+      };
+    }).filter((face) => face.pts.length >= 3 && face.area > 20);
+  }
+
+  /**
+   * Put each Pacific region dot on the dashed face center.
+   * Tahiti, Bora Bora, and the eight Hawaiian islands keep their own dots.
+   * A face whose only readable mark is one country polygon keeps that polygon
+   * centered instead of a dot.
+   */
+  function addEmptyFaceDot(face) {
+    const size = MAIN_DOT_PX;
+    const [displayLat, displayLng] = visibleMarkerLatLng(face.centroid.lat, face.centroid.lng);
+    const icon = L.divIcon({
+      className: "island-marker",
+      html: `<span class="island-marker__dot" style="width:${size}px;height:${size}px"></span>`,
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2],
+    });
+    const marker = L.marker([displayLat, displayLng], { icon, interactive: false, keyboard: false });
+    marker.addTo(map);
+    const el = marker.getElement();
+    if (el) {
+      el.dataset.regionFace = String(face.index);
+      el.dataset.regionRole = "center";
+      el.dataset.regionMark = "empty";
+    }
+    emptyFaceMarkers.push(marker);
+  }
+
+  function centerPacificRegionMarks() {
+    if (!map?.latLngToLayerPoint) return;
+    emptyFaceMarkers.forEach((marker) => marker.remove());
+    emptyFaceMarkers = [];
+    const faces = pacificFaces();
+    if (!faces.length) return;
+    const shared = sharedMapCodeCounts();
+    const membersByFace = new Map(faces.map((face) => [face.index, []]));
+
+    function readablePath(entry) {
+      if (!entry.mapCode || (shared.get(entry.mapCode) || 0) !== 1) return null;
+      const layer = mapByCode.get(entry.mapCode)?.layer;
+      const path = layer?.getElement?.();
+      if (!path?.getBBox) return null;
+      const box = path.getBBox();
+      if (Math.min(box.width, box.height) < 8) return null;
+      if (box.width > 160 || box.height > 160) return null;
+      return path;
+    }
+
+    entries.forEach((entry) => {
+      const ll = insetLatLng(entry);
+      if (!ll) return;
+      const lat = ll[0];
+      const lng = pacificLng(ll[1]);
+      let best = null;
+      faces.forEach((face) => {
+        if (!pointInRing(lat, lng, ringAsLngLat(face.latlngs))) return;
+        if (!best || face.area < best.area) best = face;
+      });
+      if (!best) return;
+      const home = map.latLngToLayerPoint([lat, lng]);
+      membersByFace.get(best.index).push({
+        entry,
+        face: best,
+        homeX: home.x,
+        homeY: home.y,
+        outlier: isPacificOutlier(entry),
+      });
+    });
+
+    const audit = [];
+    const centerBlocks = [];
+    membersByFace.forEach((members, faceIndex) => {
+      const face = faces.find((item) => item.index === faceIndex);
+      const outliers = members.filter((member) => member.outlier);
+      const collapsed = members.filter((member) => !member.outlier);
+      const readable = collapsed.map((member) => readablePath(member.entry)).filter(Boolean);
+      const uniquePaths = [...new Set(readable)];
+      const usePolygon = uniquePaths.length === 1 && collapsed.length > 0;
+      if (usePolygon) {
+        const path = uniquePaths[0];
+        const box = path.getBBox();
+        const boxCx = box.x + box.width / 2;
+        const boxCy = box.y + box.height / 2;
+        const dx = face.cx - boxCx;
+        const dy = face.cy - boxCy;
+        const shortSide = Math.min(box.width, box.height) || 1;
+        const regionShort = Math.min(
+          ...face.pts.map((point) => Math.hypot(point[0] - face.cx, point[1] - face.cy)),
+        ) * 1.4;
+        let scale = 1;
+        if (shortSide > regionShort && regionShort > 8) scale = regionShort / shortSide;
+        path.setAttribute(
+          "transform",
+          `translate(${face.cx.toFixed(2)} ${face.cy.toFixed(2)}) scale(${scale.toFixed(3)}) translate(${(-boxCx).toFixed(2)} ${(-boxCy).toFixed(2)})`,
+        );
+        path.dataset.regionMark = "center";
+        path.dataset.regionFace = String(face.index);
+        path.dataset.placeIds = collapsed.map((member) => member.entry.id).join(" ");
+        collapsed.forEach((member) => {
+          if (member.entry.marker) {
+            member.entry.marker.remove();
+            member.entry.marker = null;
+          }
+        });
+        audit.push({
+          face: face.index,
+          kind: "polygon",
+          names: collapsed.map((member) => member.entry.displayName),
+          dx: Math.round(dx * 10) / 10,
+          dy: Math.round(dy * 10) / 10,
+          dist: Math.round(Math.hypot(dx, dy) * 10) / 10,
+          scale: Math.round(scale * 1000) / 1000,
+        });
+        centerBlocks.push({ x: face.cx, y: face.cy, r: Math.max(2.5, (shortSide * scale) / 2) });
+      } else if (collapsed.length) {
+        collapsed.forEach((member) => {
+          const before = member.entry.marker
+            ? map.latLngToLayerPoint(member.entry.marker.getLatLng())
+            : { x: member.homeX, y: member.homeY };
+          audit.push({
+            face: face.index,
+            kind: "dot",
+            name: member.entry.displayName,
+            dx: Math.round((before.x - face.cx) * 10) / 10,
+            dy: Math.round((before.y - face.cy) * 10) / 10,
+            dist: Math.round(Math.hypot(before.x - face.cx, before.y - face.cy) * 10) / 10,
+          });
+          addIslandMarker(member.entry, face.centroid.lat, face.centroid.lng, MAIN_DOT_PX);
+          const el = member.entry.marker?.getElement();
+          if (el) {
+            el.dataset.regionFace = String(face.index);
+            el.dataset.regionRole = "center";
+          }
+        });
+        centerBlocks.push({ x: face.cx, y: face.cy, r: MAIN_DOT_PX / 2 });
+      } else if (!outliers.length) {
+        addEmptyFaceDot(face);
+        audit.push({ face: face.index, kind: "empty", name: "(empty face)", dx: 0, dy: 0, dist: 0 });
+        centerBlocks.push({ x: face.cx, y: face.cy, r: MAIN_DOT_PX / 2 });
+      }
+      outliers.forEach((member) => {
+        const before = member.entry.marker
+          ? map.latLngToLayerPoint(member.entry.marker.getLatLng())
+          : { x: member.homeX, y: member.homeY };
+        audit.push({
+          face: face.index,
+          kind: "outlier",
+          name: member.entry.displayName,
+          dx: Math.round((before.x - face.cx) * 10) / 10,
+          dy: Math.round((before.y - face.cy) * 10) / 10,
+          dist: Math.round(Math.hypot(before.x - face.cx, before.y - face.cy) * 10) / 10,
+        });
+      });
+    });
+
+    const outlierDots = [];
+    membersByFace.forEach((members) => {
+      members.forEach((member) => {
+        if (!member.outlier || !member.entry.marker) return;
+        const current = map.latLngToLayerPoint(member.entry.marker.getLatLng());
+        const el = member.entry.marker.getElement()?.querySelector(".island-marker__dot");
+        const size = el ? parseFloat(el.style.width) || MAIN_DOT_PX : MAIN_DOT_PX;
+        outlierDots.push({
+          entry: member.entry,
+          face: member.face,
+          x: current.x,
+          y: current.y,
+          r: size / 2,
+        });
+      });
+    });
+    for (let iter = 0; iter < 12; iter += 1) {
+      outlierDots.forEach((dot) => {
+        centerBlocks.forEach((block) => {
+          let dx = dot.x - block.x;
+          let dy = dot.y - block.y;
+          const dist = Math.hypot(dx, dy) || 0.01;
+          const need = dot.r + block.r + 1.1;
+          if (dist >= need) return;
+          const push = need - dist;
+          dx /= dist;
+          dy /= dist;
+          const nextX = dot.x + dx * push;
+          const nextY = dot.y + dy * push;
+          if (!pixelInsideRing(nextX, nextY, dot.face.pts)) return;
+          dot.x = nextX;
+          dot.y = nextY;
+        });
+      });
+    }
+    outlierDots.forEach((dot) => {
+      const ll = map.layerPointToLatLng([dot.x, dot.y]);
+      addIslandMarker(dot.entry, ll.lat, ll.lng, dot.r * 2);
+      const el = dot.entry.marker?.getElement();
+      if (el) {
+        el.dataset.regionFace = String(dot.face.index);
+        el.dataset.regionRole = "outlier";
+      }
+    });
+
+    window.__regionCenterAudit = audit;
   }
 
   function computeNeedsInset(entry) {
@@ -5111,34 +5449,42 @@ body.finish-celebration-active .score {
     return svg;
   }
 
-  /** Width as a fraction of the stage. These shares are not scaled down. */
+  /** Width as a fraction of the stage. This share is not scaled down. */
   const INSET_WIDTH_SHARE = {
     caribbean: 0.2,
-    mediterranean: 0.2,
-    pacific: 0.105,
   };
+
+  /**
+   * Island envelope: Cuba through the Lesser Antilles, Bahamas, Trinidad,
+   * and the western cays (Cozumel, Utila). Mexico, Central America, and
+   * northern South America are outside this box or skipped when drawn.
+   * Easter Island (-26.9, -110.5) is outside.
+   */
+  const CARIBBEAN_MAINLAND = new Set([
+    "Mexico",
+    "Guatemala",
+    "Belize",
+    "Honduras",
+    "El Salvador",
+    "Nicaragua",
+    "Costa Rica",
+    "Panama",
+    "Colombia",
+    "Venezuela",
+    "Guyana",
+    "Suriname",
+    "Brazil",
+    "Ecuador",
+    "United States of America",
+  ]);
 
   const OVERLAY_INSETS = [
     {
       id: "caribbean",
       label: "Caribbean",
       corner: "left",
-      bounds: { minLat: 8.2, maxLat: 27.8, minLng: -90.2, maxLng: -59.2 },
+      bounds: { minLat: 9.9, maxLat: 27.4, minLng: -88.0, maxLng: -59.2 },
       anchor: [16.2, -74.2],
-    },
-    {
-      id: "mediterranean",
-      label: "Mediterranean",
-      corner: "left",
-      bounds: { minLat: 29.4, maxLat: 47.8, minLng: -10.4, maxLng: 36.8 },
-      anchor: [37.2, 14.8],
-    },
-    {
-      id: "pacific",
-      label: "Pacific",
-      corner: "right",
-      bounds: { minLat: -48, maxLat: 28.4, minLng: 108, maxLng: 232, shift: true },
-      anchor: [-16.5, 172],
     },
   ];
 
@@ -5160,7 +5506,7 @@ body.finish-celebration-active .score {
     if (!cards.length) {
       return { dock: "none", fullBleed: true, map: mapBox, slots: [] };
     }
-    const order = ["caribbean", "mediterranean", "pacific"];
+    const order = ["caribbean"];
     const line = order.map((id) => cards.find((card) => card.id === id)).filter(Boolean);
     const row = line.length ? line : cards;
     const rowW = row.reduce((sum, card) => sum + card.w, 0) + gap * (row.length - 1);
@@ -5207,30 +5553,17 @@ body.finish-celebration-active .score {
     map.invalidateSize({ animate: false, pan: false });
     const size = map.getSize();
     if (size.x < 40 || size.y < 40) return;
-    // Web Mercator draws 360° across 256px at zoom 0.
-    // Width fit puts longitude -180 on the left edge and 180 on the right.
-    // Height fit puts latitudes -58 and 72.5 on the top and bottom.
-    // The open zoom is the smaller of the two. Which one wins is the screen
-    // ratio: the latitude band is about twice as wide as it is tall, so a
-    // short wide stage (the 1920×900 content box) is past that and the height
-    // fit wins. Longitude stays centered: when the width fit wins, -180 and
-    // 180 are the stage edges; when the height fit wins they are the edges of
-    // the world, with equal ocean on both sides.
-    // No fitBounds and no maxBounds — both pan the opening frame.
-    const widthZoom = Math.log2(size.x / 256);
-    const bandNorth = map.project([WORLD_NORTH, 0], 0);
-    const bandSouth = map.project([WORLD_SOUTH, 0], 0);
-    const bandPx = Math.abs(bandSouth.y - bandNorth.y) || 1;
-    const heightZoom = Math.log2(size.y / bandPx);
-    const openZoom = Math.min(widthZoom, heightZoom);
+    // Width fit: 360° is exactly the stage, so a side copy of the date line
+    // is not on screen. Center 160°E puts that date line in the view. Land
+    // west of 25°W is drawn at +360, so the Pacific islands continue to the
+    // right of Australia. The top edge is 64°N, through interior Alaska.
+    // No fitBounds.
+    const openZoom = Math.log2(size.x / 256);
     map.setMaxBounds(null);
     map.setMinZoom(0);
     map.setMaxZoom(Math.max(6, openZoom));
-    const north = map.project([WORLD_NORTH, 0], openZoom);
-    const south = map.project([WORLD_SOUTH, 0], openZoom);
-    const midY = (north.y + south.y) / 2;
-    const worldW = 256 * (2 ** openZoom);
-    const center = map.unproject([worldW / 2, midY], openZoom);
+    const north = map.project([VIEW_NORTH, VIEW_CENTER_LNG], openZoom);
+    const center = map.unproject([north.x, north.y + size.y / 2], openZoom);
     map.stop();
     map.setView(center, openZoom, { animate: false });
     map.setMinZoom(openZoom);
@@ -5789,6 +6122,7 @@ body.finish-celebration-active .score {
     allFeatures.forEach((feature) => {
       const mapCode = countryCode(feature.properties);
       if (!mapCode || mapCode === "ATA") return;
+      if (spec.id === "caribbean" && CARIBBEAN_MAINLAND.has((feature.properties || {}).ADMIN)) return;
       const projected = [];
       featurePolygons(feature).forEach((poly) => {
         poly.forEach((ring) => {
@@ -5897,7 +6231,7 @@ body.finish-celebration-active .score {
       featurePolygons(feature).forEach((poly) => {
         const ring = poly[0];
         if (!ring || ring.length < 3) return;
-        ring.forEach(([lng, lat]) => {
+        displayRing(ring).forEach(([lng, lat]) => {
           const point = stagePoint(lat, lng);
           if (point.x < minX) minX = point.x;
           if (point.x > maxX) maxX = point.x;
@@ -5925,8 +6259,6 @@ body.finish-celebration-active .score {
 
   const PREFERRED_BASIN = {
     caribbean: "south-atlantic",
-    mediterranean: "south-indian",
-    pacific: "south-pacific",
   };
 
   function screenRings(admin) {
@@ -5969,10 +6301,11 @@ body.finish-celebration-active .score {
     return a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
   }
 
-  /** Longitude columns that contain land between two latitudes. 0.25° cells. */
+  /** Longitude columns that contain land between two latitudes. 0.25° cells, view longitudes. */
   function landLngMask(minLat, maxLat) {
     const cell = 0.25;
-    const n = Math.round(360 / cell);
+    const origin = -40;
+    const n = Math.round(400 / cell);
     const blocked = new Uint8Array(n);
     const lats = [];
     const step = 0.4;
@@ -5982,7 +6315,7 @@ body.finish-celebration-active .score {
     if (lats.length === 0 || lats[lats.length - 1] < hi) lats.push(hi);
     allFeatures.forEach((feature) => {
       featurePolygons(feature).forEach((poly) => {
-        const ring = poly[0];
+        const ring = displayRing(poly[0] || []);
         if (!ring || ring.length < 3) return;
         let mn = 90;
         let mx = -90;
@@ -6010,8 +6343,8 @@ body.finish-celebration-active .score {
             const a = xs[k];
             const b = xs[k + 1];
             if (b - a > 180) continue;
-            let i0 = Math.floor((a + 180) / cell);
-            let i1 = Math.floor((b + 180) / cell);
+            let i0 = Math.floor((a - origin) / cell);
+            let i1 = Math.floor((b - origin) / cell);
             if (i0 < 0) i0 = 0;
             if (i1 >= n) i1 = n - 1;
             for (let i = i0; i <= i1; i += 1) blocked[i] = 1;
@@ -6033,14 +6366,15 @@ body.finish-celebration-active .score {
 
   function maskLandCount(mask, lng0, lng1) {
     const cell = 0.25;
+    const origin = -40;
     const n = mask.length;
     let a = Math.min(lng0, lng1);
     let b = Math.max(lng0, lng1);
-    a = Math.max(-180, a);
-    b = Math.min(180, b);
+    a = Math.max(origin, a);
+    b = Math.min(origin + 400, b);
     if (b - a < 0.05) return 0;
-    let i0 = Math.floor((a + 180) / cell);
-    let i1 = Math.floor((b + 180) / cell);
+    let i0 = Math.floor((a - origin) / cell);
+    let i1 = Math.floor((b - origin) / cell);
     if (i0 < 0) i0 = 0;
     if (i1 >= n) i1 = n - 1;
     let count = 0;
@@ -6083,12 +6417,11 @@ body.finish-celebration-active .score {
     });
     if (cards.some((card) => card.w < 8 || card.h < 8)) return null;
 
-    const world = {
-      left: stagePoint(0, -180).x,
-      right: stagePoint(0, 180).x,
+    const lngAt = (x) => {
+      const mapRect = map.getContainer().getBoundingClientRect();
+      const mx = x - (mapRect.left - stageRect.left);
+      return map.containerPointToLatLng([mx, mapRect.height / 2]).lng;
     };
-    const span = world.right - world.left || 1;
-    const lngAt = (x) => -180 + ((x - world.left) / span) * 360;
     const latAt = (y) => {
       const mapRect = map.getContainer().getBoundingClientRect();
       const my = y - (mapRect.top - stageRect.top);
@@ -6133,7 +6466,44 @@ body.finish-celebration-active .score {
       masks.set(card.id, landLngMask(top, bottom));
     });
 
+    const easter = stagePoint(-26.876, viewLng(-110.5132));
+    const coversEaster = (card, x) => {
+      const pad = 10;
+      return easter.x >= x - pad
+        && easter.x <= x + card.w + pad
+        && easter.y >= card.y - pad
+        && easter.y <= card.y + card.h + pad;
+    };
+    let meshBox = null;
+    const region = islandRegions();
+    if (region.kept) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      region.strokes.forEach((stroke) => {
+        stroke.forEach(([lat, lng]) => {
+          const xLng = lng < 0 ? lng + 360 : lng;
+          if (xLng < 100 || xLng > 260) return;
+          const point = stagePoint(lat, xLng);
+          if (point.x < minX) minX = point.x;
+          if (point.x > maxX) maxX = point.x;
+          if (point.y < minY) minY = point.y;
+          if (point.y > maxY) maxY = point.y;
+        });
+      });
+      if (Number.isFinite(minX)) meshBox = { minX, maxX, minY, maxY };
+    }
+    const coversMesh = (card, x) => {
+      if (!meshBox) return false;
+      const pad = 6;
+      return x < meshBox.maxX + pad
+        && x + card.w > meshBox.minX - pad
+        && card.y < meshBox.maxY + pad
+        && card.y + card.h > meshBox.minY - pad;
+    };
     const blocked = (card, x) => {
+      if (coversEaster(card, x) || coversMesh(card, x)) return 1;
       const mask = masks.get(card.id);
       const land = maskLandCount(mask, lngAt(x), lngAt(x + card.w));
       if (land > 0) return land;
@@ -6384,7 +6754,7 @@ body.finish-celebration-active .score {
     const feature = allFeatures.find((item) => (item.properties || {}).ADMIN === admin);
     if (!feature) return [];
     return featurePolygons(feature)
-      .map((poly) => poly[0])
+      .map((poly) => displayRing(poly[0]))
       .filter((ring) => ring && ring.length >= 3);
   }
 
@@ -6432,8 +6802,8 @@ body.finish-celebration-active .score {
   }
 
   function updateLeaderLines() {
-    // Bottom seats are far from the Caribbean, the Mediterranean, and the
-    // Pacific anchor. A line from there crosses a continent, so draw none.
+    // The Caribbean card sits on the bottom in open ocean. A line from
+    // there back to the islands crosses a continent, so draw none.
     document.getElementById("inset-leaders")?.remove();
   }
 
@@ -6444,6 +6814,7 @@ body.finish-celebration-active .score {
     layoutMapFrame();
     layoutInsetCards();
     buildMainMapClusterOutlines();
+    centerPacificRegionMarks();
     updateLeaderLines();
     framingMap = false;
   }
@@ -6583,7 +6954,15 @@ body.finish-celebration-active .score {
     await loadIslandRegionPins();
     indexPrimaryEntriesForMapCodes(gameCountries);
 
-    const layer = L.geoJSON(geojson, {
+    const viewGeo = {
+      type: "FeatureCollection",
+      features: geojson.features.map((feature) => ({
+        type: "Feature",
+        properties: feature.properties,
+        geometry: displayGeometry(feature.geometry),
+      })),
+    };
+    const layer = L.geoJSON(viewGeo, {
       style: unfilledStyle,
       filter: (feature) => countryCode(feature.properties) !== null,
       onEachFeature: (feature, featLayer) => {
@@ -6604,6 +6983,7 @@ body.finish-celebration-active .score {
     layoutMapFrame();
     layoutInsetCards();
     buildMainMapClusterOutlines();
+    centerPacificRegionMarks();
     updateLeaderLines();
     map.on("zoom move", updateLeaderLines);
     if (stageEl && typeof ResizeObserver !== "undefined") {
