@@ -1149,7 +1149,7 @@ body.finish-celebration-active .score {
 
 .inset-map {
   position: absolute;
-  /* Share of the stage. The list fills the stage, so this tracks the window. */
+  /* Share of the stage. Layout keeps this share; it does not shrink the card. */
   width: 20%;
   margin: 0;
   padding: 0;
@@ -1158,7 +1158,7 @@ body.finish-celebration-active .score {
 }
 
 .inset-map[data-corner="right"] {
-  /* Narrower so it can sit in the ocean west of New Zealand. */
+  /* Pacific card. Layout keeps this share of the stage and does not shrink it. */
   width: 10.5%;
 }
 
@@ -4025,11 +4025,57 @@ body.finish-celebration-active .score {
     return out;
   }
 
+  /** Longitude of a stroke vertex in the inset frame. A dateline copy whose center sits outside the frame is folded back in. */
+  function lngInInsetFrame(lng, frame) {
+    let value = frame.shift ? lng : (lng > 180 ? lng - 360 : lng);
+    if (!frame.shift) return value;
+    if (value < frame.minLng) value += 360;
+    if (value > frame.maxLng) value -= 360;
+    return value;
+  }
+
+  function outlineCenter(strokes, frame) {
+    let lat = 0;
+    let lng = 0;
+    let count = 0;
+    strokes.forEach((stroke) => {
+      stroke.forEach(([pointLat, pointLng]) => {
+        lat += pointLat;
+        lng += lngInInsetFrame(pointLng, frame);
+        count += 1;
+      });
+    });
+    if (!count) return null;
+    return [lat / count, lng / count];
+  }
+
+  function outlineCenterInside(center, frame) {
+    if (!center) return true;
+    return center[0] >= frame.minLat
+      && center[0] <= frame.maxLat
+      && center[1] >= frame.minLng
+      && center[1] <= frame.maxLng;
+  }
+
+  /**
+   * The dashed outline has to describe the same place as the inset.
+   * If its center is outside the frame, slide longitude by whole turns
+   * until the center falls inside. Latitude is left alone.
+   */
+  function placeOutlineInFrame(strokes, frame) {
+    const center = outlineCenter(strokes, frame);
+    if (outlineCenterInside(center, frame)) return strokes;
+    const turns = [360, -360, 720, -720];
+    for (let i = 0; i < turns.length; i += 1) {
+      const turn = turns[i];
+      const shifted = strokes.map((stroke) => stroke.map(([pointLat, pointLng]) => [pointLat, pointLng + turn]));
+      if (outlineCenterInside(outlineCenter(shifted, frame), frame)) return shifted;
+    }
+    return strokes;
+  }
+
   function clipStrokeToFrame(stroke, frame) {
-    let chains = [stroke.map(([lat, lng]) => {
-      const frameLngValue = frame.shift ? lng : (lng > 180 ? lng - 360 : lng);
-      return [frameLngValue, lat];
-    })];
+    let chains = [stroke.map(([lat, lng]) => [lngInInsetFrame(lng, frame), lat])];
     [
       [(point) => point[0] >= frame.minLng, frame.minLng, 0],
       [(point) => point[0] <= frame.maxLng, frame.maxLng, 0],
@@ -4471,7 +4517,8 @@ body.finish-celebration-active .score {
     const region = islandRegions();
     if (!region.kept) return;
     const pixelLines = [];
-    cleanRegionBorderChains(region.strokes).forEach((stroke) => {
+    const strokes = placeOutlineInFrame(region.strokes, frame);
+    cleanRegionBorderChains(strokes).forEach((stroke) => {
       clipStrokeToFrame(stroke, frame).forEach((chain) => {
         pixelLines.push(chain.map(([lng, lat]) => {
           const point = project(lng, lat);
@@ -5064,7 +5111,7 @@ body.finish-celebration-active .score {
     return svg;
   }
 
-  /** Preferred width as a fraction of the stage. Layout may scale these down together. */
+  /** Width as a fraction of the stage. These shares are not scaled down. */
   const INSET_WIDTH_SHARE = {
     caribbean: 0.2,
     mediterranean: 0.2,
@@ -5160,17 +5207,30 @@ body.finish-celebration-active .score {
     map.invalidateSize({ animate: false, pan: false });
     const size = map.getSize();
     if (size.x < 40 || size.y < 40) return;
-    // Web Mercator draws 360° across 256px at zoom 0. This zoom is the
-    // minimum: longitude -180 sits on the left edge and 180 on the right.
+    // Web Mercator draws 360° across 256px at zoom 0.
+    // Width fit puts longitude -180 on the left edge and 180 on the right.
+    // Height fit puts latitudes -58 and 72.5 on the top and bottom.
+    // The open zoom is the smaller of the two. Which one wins is the screen
+    // ratio: the latitude band is about twice as wide as it is tall, so a
+    // short wide stage (the 1920×900 content box) is past that and the height
+    // fit wins. Longitude stays centered: when the width fit wins, -180 and
+    // 180 are the stage edges; when the height fit wins they are the edges of
+    // the world, with equal ocean on both sides.
     // No fitBounds and no maxBounds — both pan the opening frame.
-    const openZoom = Math.log2(size.x / 256);
+    const widthZoom = Math.log2(size.x / 256);
+    const bandNorth = map.project([WORLD_NORTH, 0], 0);
+    const bandSouth = map.project([WORLD_SOUTH, 0], 0);
+    const bandPx = Math.abs(bandSouth.y - bandNorth.y) || 1;
+    const heightZoom = Math.log2(size.y / bandPx);
+    const openZoom = Math.min(widthZoom, heightZoom);
     map.setMaxBounds(null);
     map.setMinZoom(0);
     map.setMaxZoom(Math.max(6, openZoom));
     const north = map.project([WORLD_NORTH, 0], openZoom);
     const south = map.project([WORLD_SOUTH, 0], openZoom);
     const midY = (north.y + south.y) / 2;
-    const center = map.unproject([size.x / 2, midY], openZoom);
+    const worldW = 256 * (2 ** openZoom);
+    const center = map.unproject([worldW / 2, midY], openZoom);
     map.stop();
     map.setView(center, openZoom, { animate: false });
     map.setMinZoom(openZoom);
@@ -5823,312 +5883,491 @@ body.finish-celebration-active .score {
     });
   }
 
-  /**
-   * Land, island dots, and region strokes. A summed table answers whether a
-   * card rectangle covers any of them. The step tracks the stage so a small
-   * window is sampled as finely as a large one.
-   */
-  function mapBlockedGrid() {
-    const stageRect = stageEl.getBoundingClientRect();
-    const step = Math.max(4, Math.round(Math.min(stageRect.width, stageRect.height) * 0.0045));
-    const cols = Math.ceil(stageRect.width / step);
-    const rows = Math.ceil(stageRect.height / step);
-    const blocked = new Uint8Array(cols * rows);
-    const paint = (x, y, radiusPx) => {
-      const c = Math.floor(x / step);
-      const r = Math.floor(y / step);
-      const rad = Math.max(0, Math.ceil(radiusPx / step));
-      for (let dr = -rad; dr <= rad; dr += 1) {
-        const rr = r + dr;
-        if (rr < 0 || rr >= rows) continue;
-        for (let dc = -rad; dc <= rad; dc += 1) {
-          const cc = c + dc;
-          if (cc < 0 || cc >= cols) continue;
-          blocked[rr * cols + cc] = 1;
-        }
-      }
-    };
-    const paintScreenRing = (points) => {
-      if (points.length < 3) return;
-      points.forEach((point) => paint(point.x, point.y, step * 0.6));
-      const hits = new Map();
-      for (let i = 0; i < points.length; i += 1) {
-        const a = points[i];
-        const b = points[(i + 1) % points.length];
-        const span = Math.hypot(b.x - a.x, b.y - a.y);
-        const pieces = Math.max(1, Math.ceil(span / (step * 0.5)));
-        for (let piece = 0; piece <= pieces; piece += 1) {
-          const t = piece / pieces;
-          paint(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, step * 0.6);
-        }
-        if (a.y === b.y) continue;
-        const y0 = Math.min(a.y, b.y);
-        const y1 = Math.max(a.y, b.y);
-        const x0 = a.y < b.y ? a.x : b.x;
-        const x1 = a.y < b.y ? b.x : a.x;
-        const row0 = Math.floor(y0 / step);
-        const row1 = Math.floor((y1 - 0.01) / step);
-        for (let row = row0; row <= row1; row += 1) {
-          const y = row * step + step / 2;
-          if (y < y0 || y >= y1) continue;
-          const x = x0 + ((x1 - x0) * (y - y0)) / (y1 - y0);
-          if (!hits.has(row)) hits.set(row, []);
-          hits.get(row).push(Math.floor(x / step));
-        }
-      }
-      hits.forEach((colsHit, row) => {
-        if (row < 0 || row >= rows) return;
-        colsHit.sort((p, q) => p - q);
-        for (let i = 0; i + 1 < colsHit.length; i += 2) {
-          const c0 = Math.max(0, Math.min(colsHit[i], colsHit[i + 1]));
-          const c1 = Math.min(cols - 1, Math.max(colsHit[i], colsHit[i + 1]));
-          for (let col = c0; col <= c1; col += 1) blocked[row * cols + col] = 1;
-        }
+  function countryScreenBoxes() {
+    const limit = stageEl.clientWidth * 0.85;
+    const boxes = [];
+    allFeatures.forEach((feature) => {
+      const admin = (feature.properties || {}).ADMIN;
+      if (!admin || admin === "Antarctica") return;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      let count = 0;
+      featurePolygons(feature).forEach((poly) => {
+        const ring = poly[0];
+        if (!ring || ring.length < 3) return;
+        ring.forEach(([lng, lat]) => {
+          const point = stagePoint(lat, lng);
+          if (point.x < minX) minX = point.x;
+          if (point.x > maxX) maxX = point.x;
+          if (point.y < minY) minY = point.y;
+          if (point.y > maxY) maxY = point.y;
+          count += 1;
+        });
       });
-    };
-    document.querySelectorAll("#map .leaflet-overlay-pane path.leaflet-interactive").forEach((path) => {
-      if (path.classList.contains("island-cluster-outline")) return;
-      const ctm = path.getScreenCTM();
-      const description = path.getAttribute("d") || "";
-      if (!ctm || !description) return;
-      description.split(/[Mm]/).forEach((part) => {
-        const nums = part.match(/-?\d*\.?\d+(?:e[-+]?\d+)?/gi);
-        if (!nums || nums.length < 6) return;
-        const points = [];
-        for (let i = 0; i + 1 < nums.length; i += 2) {
-          const screen = new DOMPoint(Number(nums[i]), Number(nums[i + 1])).matrixTransform(ctm);
-          points.push({ x: screen.x - stageRect.left, y: screen.y - stageRect.top });
-        }
-        paintScreenRing(points);
-      });
+      if (count < 3) return;
+      if (maxX - minX < 1 || maxY - minY < 1 || maxX - minX > limit) return;
+      boxes.push({ admin, minX, maxX, minY, maxY });
     });
-    const halo = Math.min(stageRect.width, stageRect.height) * 0.006;
-    document.querySelectorAll("#map path.island-cluster-outline").forEach((path) => {
-      const ctm = path.getScreenCTM();
-      const len = path.getTotalLength ? path.getTotalLength() : 0;
-      if (!ctm || !len) return;
-      const stride = Math.max(3, step);
-      for (let dist = 0; dist <= len; dist += stride) {
-        const point = path.getPointAtLength(dist);
-        const screen = new DOMPoint(point.x, point.y).matrixTransform(ctm);
-        paint(screen.x - stageRect.left, screen.y - stageRect.top, halo);
-      }
-    });
-    document.querySelectorAll(".island-marker").forEach((el) => {
-      const rect = el.getBoundingClientRect();
-      const c0 = Math.max(0, Math.floor((rect.left - stageRect.left) / step));
-      const c1 = Math.min(cols, Math.ceil((rect.right - stageRect.left) / step));
-      const r0 = Math.max(0, Math.floor((rect.top - stageRect.top) / step));
-      const r1 = Math.min(rows, Math.ceil((rect.bottom - stageRect.top) / step));
-      for (let row = r0; row < r1; row += 1) {
-        for (let col = c0; col < c1; col += 1) blocked[row * cols + col] = 1;
-      }
-    });
-    const coast = new Uint8Array(blocked.length);
-    for (let row = 0; row < rows; row += 1) {
-      for (let col = 0; col < cols; col += 1) {
-        if (!blocked[row * cols + col]) continue;
-        for (let dr = -1; dr <= 1; dr += 1) {
-          const rr = row + dr;
-          if (rr < 0 || rr >= rows) continue;
-          for (let dc = -1; dc <= 1; dc += 1) {
-            const cc = col + dc;
-            if (cc < 0 || cc >= cols) continue;
-            coast[rr * cols + cc] = 1;
-          }
-        }
-      }
-    }
-    blocked.set(coast);
-    const stride = cols + 1;
-    const sat = new Uint32Array(stride * (rows + 1));
-    for (let row = 0; row < rows; row += 1) {
-      let run = 0;
-      for (let col = 0; col < cols; col += 1) {
-        run += blocked[row * cols + col];
-        sat[(row + 1) * stride + (col + 1)] = sat[row * stride + (col + 1)] + run;
-      }
-    }
-    return { step, cols, rows, sat, stride, stageRect };
+    return boxes;
   }
 
-  function rectBlocked(grid, x, y, w, h) {
-    const { step, cols, rows, sat, stride } = grid;
-    const c0 = Math.max(0, Math.floor(x / step));
-    const r0 = Math.max(0, Math.floor(y / step));
-    const c1 = Math.min(cols, Math.ceil((x + w) / step));
-    const r1 = Math.min(rows, Math.ceil((y + h) / step));
-    if (c0 >= c1 || r0 >= r1) return false;
-    return sat[r1 * stride + c1] - sat[r0 * stride + c1] - sat[r1 * stride + c0] + sat[r0 * stride + c0] > 0;
+  function wholeCountriesIn(rect, boxes) {
+    const names = [];
+    boxes.forEach((box) => {
+      if (box.minX >= rect.x && box.maxX <= rect.x + rect.w && box.minY >= rect.y && box.maxY <= rect.y + rect.h) {
+        names.push(box.admin);
+      }
+    });
+    return names;
+  }
+
+  const PREFERRED_BASIN = {
+    caribbean: "south-atlantic",
+    mediterranean: "south-indian",
+    pacific: "south-pacific",
+  };
+
+  function screenRings(admin) {
+    return outerRings(admin).map((ring) => ring.map(([lng, lat]) => stagePoint(lat, lng)));
+  }
+
+  function pointInScreenRing(x, y, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+      const a = ring[i];
+      const b = ring[j];
+      const crosses = (a.y > y) !== (b.y > y);
+      if (crosses && x < ((b.x - a.x) * (y - a.y)) / ((b.y - a.y) || 1e-9) + a.x) inside = !inside;
+    }
+    return inside;
+  }
+
+  function rectHitsRings(rect, rings) {
+    for (let r = 0; r < rings.length; r += 1) {
+      const ring = rings[r];
+      for (let i = 0; i < ring.length; i += 1) {
+        const point = ring[i];
+        if (point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h) {
+          return true;
+        }
+      }
+    }
+    const step = 7;
+    for (let y = rect.y + 3; y < rect.y + rect.h; y += step) {
+      for (let x = rect.x + 3; x < rect.x + rect.w; x += step) {
+        for (let r = 0; r < rings.length; r += 1) {
+          if (pointInScreenRing(x, y, rings[r])) return true;
+        }
+      }
+    }
+    return false;
   }
 
   function rectsOverlap(a, b, gap) {
     return a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
   }
 
+  /** Longitude columns that contain land between two latitudes. 0.25° cells. */
+  function landLngMask(minLat, maxLat) {
+    const cell = 0.25;
+    const n = Math.round(360 / cell);
+    const blocked = new Uint8Array(n);
+    const lats = [];
+    const step = 0.4;
+    const lo = Math.min(minLat, maxLat);
+    const hi = Math.max(minLat, maxLat);
+    for (let lat = lo; lat <= hi; lat += step) lats.push(lat);
+    if (lats.length === 0 || lats[lats.length - 1] < hi) lats.push(hi);
+    allFeatures.forEach((feature) => {
+      featurePolygons(feature).forEach((poly) => {
+        const ring = poly[0];
+        if (!ring || ring.length < 3) return;
+        let mn = 90;
+        let mx = -90;
+        for (let i = 0; i < ring.length; i += 1) {
+          const lat = ring[i][1];
+          if (lat < mn) mn = lat;
+          if (lat > mx) mx = lat;
+        }
+        if (mx < lo || mn > hi) return;
+        lats.forEach((lat) => {
+          if (lat < mn || lat > mx) return;
+          const xs = [];
+          for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+            const lat1 = ring[j][1];
+            const lat2 = ring[i][1];
+            if ((lat1 > lat) === (lat2 > lat)) continue;
+            const lng1 = ring[j][0];
+            const lng2 = ring[i][0];
+            if (Math.abs(lng2 - lng1) > 180) continue;
+            const t = (lat - lat1) / ((lat2 - lat1) || 1e-9);
+            xs.push(lng1 + (lng2 - lng1) * t);
+          }
+          xs.sort((p, q) => p - q);
+          for (let k = 0; k + 1 < xs.length; k += 2) {
+            const a = xs[k];
+            const b = xs[k + 1];
+            if (b - a > 180) continue;
+            let i0 = Math.floor((a + 180) / cell);
+            let i1 = Math.floor((b + 180) / cell);
+            if (i0 < 0) i0 = 0;
+            if (i1 >= n) i1 = n - 1;
+            for (let i = i0; i <= i1; i += 1) blocked[i] = 1;
+          }
+        });
+      });
+    });
+    // One cell past each coast so a cape tip that falls between scan lines
+    // still counts as land. A card on that tip is a country under the card.
+    const grown = new Uint8Array(n);
+    for (let i = 0; i < n; i += 1) {
+      if (!blocked[i]) continue;
+      if (i > 0) grown[i - 1] = 1;
+      grown[i] = 1;
+      if (i + 1 < n) grown[i + 1] = 1;
+    }
+    return grown;
+  }
+
+  function maskLandCount(mask, lng0, lng1) {
+    const cell = 0.25;
+    const n = mask.length;
+    let a = Math.min(lng0, lng1);
+    let b = Math.max(lng0, lng1);
+    a = Math.max(-180, a);
+    b = Math.min(180, b);
+    if (b - a < 0.05) return 0;
+    let i0 = Math.floor((a + 180) / cell);
+    let i1 = Math.floor((b + 180) / cell);
+    if (i0 < 0) i0 = 0;
+    if (i1 >= n) i1 = n - 1;
+    let count = 0;
+    for (let i = i0; i <= i1; i += 1) if (mask[i]) count += 1;
+    return count;
+  }
+
   function seatCardsOnOcean(slots) {
     if (!map || !stageEl || !insetList || !slots.length) return null;
-    const grid = mapBlockedGrid();
-    const stageRect = grid.stageRect;
-    const edge = stageRect.width * 0.006;
-    const gap = stageRect.width * 0.008;
-    const drop = stageRect.height * 0.02;
-    const search = Math.max(grid.step, Math.round(Math.min(stageRect.width, stageRect.height) * 0.01));
-    const nz = countryScreenBox("New Zealand");
-    const nzBox = nz
-      ? { x: nz.minX, y: nz.minY, w: nz.maxX - nz.minX, h: nz.maxY - nz.minY }
-      : null;
-    const columns = new Float64Array(grid.cols);
-    columns.fill(-Infinity);
-    let australiaSouth = -Infinity;
-    outerRings("Australia").forEach((ring) => {
-      ring.forEach(([lng, lat]) => {
-        const point = stagePoint(lat, lng);
-        if (point.y > australiaSouth) australiaSouth = point.y;
-        const col = Math.floor(point.x / grid.step);
-        if (col < 0 || col >= grid.cols) return;
-        if (point.y > columns[col]) columns[col] = point.y;
-      });
-    });
-    const australiaFeature = allFeatures.find((item) => (item.properties || {}).ADMIN === "Australia");
-    const australiaCode = australiaFeature ? countryCode(australiaFeature.properties) : null;
-    const australiaEntry = australiaCode ? mapByCode.get(australiaCode) : null;
-    const australiaPaths = [];
-    const visitAustralia = (layer) => {
-      if (!layer) return;
-      if (layer._path) australiaPaths.push(layer._path);
-      if (typeof layer.eachLayer === "function") layer.eachLayer(visitAustralia);
-    };
-    if (australiaEntry) visitAustralia(australiaEntry.layer);
-    australiaPaths.forEach((path) => {
-      const ctm = path.getScreenCTM();
-      const len = path.getTotalLength ? path.getTotalLength() : 0;
-      if (!ctm || !len) return;
-      const stride = Math.max(2, len / 600);
-      for (let dist = 0; dist <= len; dist += stride) {
-        const point = path.getPointAtLength(dist);
-        const screen = new DOMPoint(point.x, point.y).matrixTransform(ctm);
-        const y = screen.y - stageRect.top;
-        if (y > australiaSouth) australiaSouth = y;
-      }
-    });
-    // The whole Pacific card sits below every part of Australia, including Tasmania.
-    const belowAustralia = Number.isFinite(australiaSouth)
-      ? australiaSouth + stageRect.height * 0.06
-      : null;
-
-    const clearsLand = (rect, cardId) => {
-      if (rectBlocked(grid, rect.x, rect.y, rect.w, rect.h)) return false;
-      if (nzBox && rectsOverlap(rect, nzBox, gap)) return false;
-      if (cardId === "pacific" && belowAustralia != null && rect.y < belowAustralia) return false;
-      const c0 = Math.max(0, Math.floor(rect.x / grid.step));
-      const c1 = Math.min(grid.cols - 1, Math.floor((rect.x + rect.w) / grid.step));
-      let south = -Infinity;
-      for (let col = c0; col <= c1; col += 1) {
-        if (columns[col] > south) south = columns[col];
-      }
-      if (south === -Infinity) return true;
-      return rect.y >= south + drop;
-    };
-
-    const placeAt = (scale) => {
-      const cards = [];
-      for (let i = 0; i < slots.length; i += 1) {
-        const el = insetList.querySelector(`.inset-map[data-inset-group="${slots[i].id}"]`);
-        if (!el) return null;
-        const share = INSET_WIDTH_SHARE[slots[i].id] || 0.16;
-        el.style.width = `${share * scale * 100}%`;
-        const viewEl = el.querySelector(".inset-map__view");
-        const aspect = Number(viewEl?.dataset.aspect) || 0.66;
-        // Definite height from the stage share. A percentage SVG height
-        // otherwise resolves against the stage and the card becomes a page frame.
-        if (viewEl) viewEl.style.height = `${Math.max(8, stageRect.width * share * scale * aspect)}px`;
-        cards.push(el);
-      }
-      const measured = cards.map((el) => ({
+    const stageRect = stageEl.getBoundingClientRect();
+    const edge = 12;
+    const gap = 10;
+    const countries = countryScreenBoxes();
+    const cards = [];
+    for (let i = 0; i < slots.length; i += 1) {
+      const el = insetList.querySelector(`.inset-map[data-inset-group="${slots[i].id}"]`);
+      if (!el) return null;
+      const share = INSET_WIDTH_SHARE[slots[i].id] || 0.2;
+      el.style.width = `${share * 100}%`;
+      const viewEl = el.querySelector(".inset-map__view");
+      const aspect = Number(viewEl?.dataset.aspect) || 0.66;
+      if (viewEl) viewEl.style.height = `${Math.max(8, stageRect.width * share * aspect)}px`;
+      cards.push({
         id: el.dataset.insetGroup,
         el,
-        dock: "bottom",
-        w: el.offsetWidth,
-        h: el.offsetHeight,
-      }));
-      if (measured.some((card) => card.w < 8 || card.h < 8)) return null;
-      const placed = new Map();
-      const minY = stageRect.height * 0.34;
-      const bestSpot = (card, rank) => {
-        const maxY = stageRect.height - card.h - edge;
-        const maxX = stageRect.width - card.w - edge;
-        if (maxY < minY || maxX < edge) return null;
-        let best = null;
-        let bestRank = Infinity;
-        for (let y = maxY; y >= minY; y -= search) {
-          for (let x = edge; x <= maxX; x += search) {
-            const rect = { x, y, w: card.w, h: card.h };
-            if (!clearsLand(rect, card.id)) continue;
-            let busy = false;
-            placed.forEach((other) => {
-              if (rectsOverlap(rect, other, gap)) busy = true;
-            });
-            if (busy) continue;
-            const score = rank(rect);
-            if (score < bestRank) {
-              bestRank = score;
-              best = rect;
-            }
-          }
+        w: 0,
+        h: 0,
+      });
+    }
+    cards.forEach((card) => {
+      card.share = INSET_WIDTH_SHARE[card.id] || 0.2;
+      card.wide = card.share >= 0.15;
+      card.naturalW = card.el.offsetWidth;
+      card.naturalH = card.el.offsetHeight;
+      card.viewEl = card.el.querySelector(".inset-map__view");
+      card.svg = card.viewEl ? card.viewEl.querySelector("svg") : null;
+      card.w = card.naturalW;
+      card.h = card.naturalH;
+      card.y = stageRect.height - edge - card.h;
+    });
+    if (cards.some((card) => card.w < 8 || card.h < 8)) return null;
+
+    const world = {
+      left: stagePoint(0, -180).x,
+      right: stagePoint(0, 180).x,
+    };
+    const span = world.right - world.left || 1;
+    const lngAt = (x) => -180 + ((x - world.left) / span) * 360;
+    const latAt = (y) => {
+      const mapRect = map.getContainer().getBoundingClientRect();
+      const my = y - (mapRect.top - stageRect.top);
+      return map.containerPointToLatLng([mapRect.width / 2, my]).lat;
+    };
+
+    // Full share first. A 20% card on a short stage is tall enough to reach
+    // Chile and Africa, which closes the southern gaps. Cap both wide cards
+    // by the same height scale until each one sits in clear water. Shrink
+    // width by that same scale only when the clear column is still narrower
+    // than the share.
+    const applySize = (heightScale, widthScale) => {
+      cards.forEach((card) => {
+        const hs = card.wide ? heightScale : 1;
+        const ws = card.wide ? widthScale : 1;
+        card.el.style.width = `${card.share * ws * 100}%`;
+        const h = Math.max(8, card.naturalH * hs);
+        if (card.viewEl) {
+          card.viewEl.style.height = `${h}px`;
+          card.viewEl.style.aspectRatio = hs < 0.999 ? "auto" : `${Math.round(card.naturalW)} / ${Math.round(card.naturalH)}`;
         }
-        return best;
-      };
-      const order = ["pacific", "caribbean", "mediterranean"];
-      const queue = [
-        ...order.map((id) => measured.find((card) => card.id === id)).filter(Boolean),
-        ...measured.filter((card) => !order.includes(card.id)),
-      ];
-      for (let i = 0; i < queue.length; i += 1) {
-        const card = queue[i];
-        const spot = bestSpot(card, (rect) => {
-          if (card.id === "pacific") {
-            const targetX = nz ? nz.minX - gap - card.w : stageRect.width - card.w - edge;
-            const west = nz && rect.x + rect.w > nz.minX - gap ? stageRect.width : 0;
-            return Math.abs(rect.x - targetX) + Math.abs(rect.y - (stageRect.height - card.h - edge)) * 0.45 + west;
-          }
-          if (card.id === "mediterranean") {
-            const left = placed.get("caribbean");
-            const right = placed.get("pacific");
-            const gapStart = left ? left.x + left.w + gap : edge;
-            const gapEnd = right ? right.x - gap - card.w : stageRect.width - card.w - edge;
-            const targetX = (Math.max(gapStart, edge) + Math.max(gapStart, gapEnd)) / 2;
-            const outside = rect.x < gapStart - gap || rect.x > gapEnd + gap ? stageRect.width * 0.4 : 0;
-            return Math.abs(rect.x - targetX) + Math.abs(rect.y - (stageRect.height - card.h - edge)) * 0.45 + outside;
-          }
-          return rect.x * 0.35 + (stageRect.height - rect.y);
-        });
-        if (!spot) return null;
-        placed.set(card.id, spot);
-      }
-      if (placed.size !== measured.length) return null;
-      return measured.map((card) => {
-        const spot = placed.get(card.id);
-        return { id: card.id, x: spot.x, y: spot.y, dock: "bottom", w: card.w, ocean: true };
+        if (card.svg) {
+          card.svg.style.width = hs < 0.999 ? "100%" : "";
+          card.svg.style.height = hs < 0.999 ? "100%" : "";
+        }
+        card.el.dataset.scale = hs.toFixed(3);
+      });
+      cards.forEach((card) => {
+        card.w = card.el.offsetWidth;
+        card.h = card.el.offsetHeight;
+        card.y = stageRect.height - edge - card.h;
       });
     };
 
-    const full = placeAt(1);
-    if (full) return full;
-    let lo = 0.28;
-    let hi = 1;
-    let bestScale = 0;
-    for (let i = 0; i < 7; i += 1) {
-      const scale = (lo + hi) / 2;
-      if (placeAt(scale)) {
-        bestScale = scale;
-        lo = scale;
-      } else {
-        hi = scale;
+    const seatOnce = () => {
+    const masks = new Map();
+    cards.forEach((card) => {
+      // Four pixels of water north of the border. A cape tip can sit on the
+      // top row without a 0.4° scan line crossing it.
+      const top = latAt(card.y - 4);
+      const bottom = latAt(card.y + card.h);
+      masks.set(card.id, landLngMask(top, bottom));
+    });
+
+    const blocked = (card, x) => {
+      const mask = masks.get(card.id);
+      const land = maskLandCount(mask, lngAt(x), lngAt(x + card.w));
+      if (land > 0) return land;
+      const rect = { x, y: card.y, w: card.w, h: card.h };
+      if (wholeCountriesIn(rect, countries).length) return 1;
+      return 0;
+    };
+
+    // Left of Chile, or east of the Tasman Sea. The left letterbox continues the eastern Pacific.
+    const basinAt = (lng) => {
+      if (lng <= -70 || lng >= 160) return "south-pacific";
+      if (lng < 25) return "south-atlantic";
+      return "south-indian";
+    };
+
+    const maxXFor = (card) => stageRect.width - edge - card.w;
+
+    const clearSegments = (card) => {
+      const lefts = [];
+      const maxX = maxXFor(card);
+      for (let x = edge; x <= maxX; x += 2) {
+        if (blocked(card, x) === 0) lefts.push(x);
+      }
+      const segs = [];
+      if (!lefts.length) return segs;
+      let start = lefts[0];
+      let prev = lefts[0];
+      let basin = basinAt(lngAt(start + card.w / 2));
+      const flush = (end) => {
+        segs.push({ basin, start, end, width: (end - start) + card.w });
+      };
+      lefts.slice(1).forEach((x) => {
+        const nextBasin = basinAt(lngAt(x + card.w / 2));
+        if (x > prev + 3 || nextBasin !== basin) {
+          flush(prev);
+          start = x;
+          basin = nextBasin;
+        }
+        prev = x;
+      });
+      flush(prev);
+      return segs;
+    };
+
+    const segments = new Map(cards.map((card) => [card.id, clearSegments(card)]));
+    const widest = (card, basin) => (segments.get(card.id) || [])
+      .filter((seg) => seg.basin === basin)
+      .sort((a, b) => b.width - a.width)[0] || null;
+    const fits = (seg, card) => Boolean(seg) && seg.width + 0.5 >= card.w;
+
+    const big = cards.filter((card) => (INSET_WIDTH_SHARE[card.id] || 0.2) >= 0.15);
+    const small = cards.filter((card) => (INSET_WIDTH_SHARE[card.id] || 0.2) < 0.15);
+    const placed = [];
+    const seats = [];
+    const take = (card, x, basin) => {
+      const rect = { x, y: card.y, w: card.w, h: card.h };
+      placed.push(rect);
+      seats.push({ card, x, basin, ocean: blocked(card, x) === 0 });
+    };
+
+    // Both wide cards go to the south Pacific when the Atlantic and Indian
+    // columns are narrower than a 20% card. Sit them at the two ends of the
+    // clear water so the gap between them is as large as that basin allows.
+    const widePlans = big.map((card) => ({
+      card,
+      pacific: widest(card, "south-pacific"),
+      atlantic: widest(card, "south-atlantic"),
+      indian: widest(card, "south-indian"),
+    }));
+    const pacificOnly = widePlans.length > 1 && widePlans.every((plan) => (
+      !fits(plan.atlantic, plan.card) && !fits(plan.indian, plan.card) && fits(plan.pacific, plan.card)
+    ));
+
+    if (pacificOnly) {
+      const [first, second] = widePlans;
+      let best = null;
+      for (let ax = first.pacific.start; ax <= first.pacific.end; ax += 4) {
+        for (let bx = second.pacific.start; bx <= second.pacific.end; bx += 4) {
+          const gapPx = ax <= bx ? bx - (ax + first.card.w) : ax - (bx + second.card.w);
+          if (!best || gapPx > best.gapPx) best = { ax, bx, gapPx };
+        }
+      }
+      if (!best || best.gapPx < gap) return null;
+      take(first.card, best.ax, "south-pacific");
+      take(second.card, best.bx, "south-pacific");
+    } else {
+      const queue = [...widePlans].sort((a, b) => {
+        const options = (plan) => [plan.pacific, plan.atlantic, plan.indian].filter((seg) => fits(seg, plan.card)).length;
+        return options(a) - options(b);
+      });
+      queue.forEach((plan) => {
+        const preferredName = PREFERRED_BASIN[plan.card.id];
+        const choices = [
+          { name: "south-atlantic", seg: plan.atlantic },
+          { name: "south-indian", seg: plan.indian },
+          { name: "south-pacific", seg: plan.pacific },
+        ].filter((choice) => fits(choice.seg, plan.card));
+        choices.sort((a, b) => {
+          if (a.name === preferredName) return -1;
+          if (b.name === preferredName) return 1;
+          if (a.name === "south-pacific") return 1;
+          if (b.name === "south-pacific") return -1;
+          return a.seg.width - b.seg.width;
+        });
+        let seated = false;
+        choices.forEach((choice) => {
+          if (seated) return;
+          const mid = choice.seg.start + (choice.seg.end - choice.seg.start) / 2;
+          const candidates = [mid, choice.seg.start, choice.seg.end];
+          for (let x = choice.seg.start; x <= choice.seg.end; x += 2) candidates.push(x);
+          for (let i = 0; i < candidates.length; i += 1) {
+            const x = candidates[i];
+            const rect = { x, y: plan.card.y, w: plan.card.w, h: plan.card.h };
+            if (placed.some((other) => rectsOverlap(rect, other, gap))) continue;
+            if (blocked(plan.card, x) !== 0) continue;
+            take(plan.card, x, choice.name);
+            seated = true;
+            break;
+          }
+        });
+      });
+    }
+
+    small.forEach((card) => {
+      const segs = (segments.get(card.id) || [])
+        .filter((seg) => fits(seg, card))
+        .sort((a, b) => {
+          const aPacific = a.basin === "south-pacific" ? 1 : 0;
+          const bPacific = b.basin === "south-pacific" ? 1 : 0;
+          if (aPacific !== bPacific) return aPacific - bPacific;
+          return a.width - b.width;
+        });
+      let seated = false;
+      segs.forEach((seg) => {
+        if (seated) return;
+        for (let x = seg.start; x <= seg.end; x += 2) {
+          const rect = { x, y: card.y, w: card.w, h: card.h };
+          if (placed.some((other) => rectsOverlap(rect, other, gap))) continue;
+          take(card, x, seg.basin);
+          seated = true;
+          break;
+        }
+      });
+    });
+
+    small.forEach((card) => {
+      if (seats.some((item) => item.card === card)) return;
+      let best = null;
+      const full = card.w;
+      for (let w = full; w >= Math.min(full, 120); w -= 2) {
+        const maxX = stageRect.width - edge - w;
+        for (let x = edge; x <= maxX; x += 2) {
+          if (maskLandCount(masks.get(card.id), lngAt(x), lngAt(x + w)) > 0) continue;
+          const rect = { x, y: card.y, w, h: card.h };
+          if (placed.some((other) => rectsOverlap(rect, other, gap))) continue;
+          if (wholeCountriesIn(rect, countries).length) continue;
+          best = { x, w };
+          break;
+        }
+        if (best) break;
+      }
+      if (!best) return;
+      card.el.style.width = `${best.w}px`;
+      card.w = card.el.offsetWidth;
+      card.el.dataset.scale = (card.w / card.naturalW).toFixed(3);
+      take(card, best.x, basinAt(lngAt(best.x + card.w / 2)));
+    });
+
+    if (seats.length !== cards.length) return null;
+    const hard = screenRings("Australia").concat(screenRings("New Zealand"));
+    seats.forEach((item) => {
+      const rect = { x: item.x, y: item.card.y, w: item.card.w, h: item.card.h };
+      if (hard.length && rectHitsRings(rect, hard)) item.ocean = false;
+    });
+    if (seats.some((item) => !item.ocean)) return null;
+    for (let i = 0; i < seats.length; i += 1) {
+      for (let j = i + 1; j < seats.length; j += 1) {
+        const a = { x: seats[i].x, y: seats[i].card.y, w: seats[i].card.w, h: seats[i].card.h };
+        const b = { x: seats[j].x, y: seats[j].card.y, w: seats[j].card.w, h: seats[j].card.h };
+        if (rectsOverlap(a, b, gap)) return null;
       }
     }
-    if (!bestScale) return null;
-    return placeAt(bestScale);
+    const byId = new Map(seats.map((item) => [item.card.id, item]));
+    return cards.map((card) => {
+      const item = byId.get(card.id);
+      card.el.dataset.ocean = item.ocean ? "1" : "0";
+      card.el.dataset.basin = item.basin;
+      return {
+        id: card.id,
+        x: item.x,
+        y: card.y,
+        dock: "bottom",
+        w: card.w,
+        ocean: item.ocean,
+      };
+    });
+    };
+
+    const finish = (heightScale, widthScale) => {
+      applySize(heightScale, widthScale);
+      return seatOnce();
+    };
+    let placed = finish(1, 1);
+    if (!placed) {
+      let lo = 0.45;
+      let hi = 1;
+      let best = 0;
+      for (let i = 0; i < 7; i += 1) {
+        const mid = (lo + hi) / 2;
+        if (finish(mid, 1)) {
+          best = mid;
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      placed = best ? finish(best, 1) : null;
+    }
+    if (!placed) {
+      let lo = 0.4;
+      let hi = 1;
+      let best = 0;
+      for (let i = 0; i < 6; i += 1) {
+        const mid = (lo + hi) / 2;
+        if (finish(mid, mid)) {
+          best = mid;
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      placed = best ? finish(best, best) : null;
+    }
+    return placed;
   }
 
   function stagePoint(lat, lng) {
@@ -6193,7 +6432,8 @@ body.finish-celebration-active .score {
   }
 
   function updateLeaderLines() {
-    // Cards sit on the ocean. Leader lines were the long strokes across the map.
+    // Bottom seats are far from the Caribbean, the Mediterranean, and the
+    // Pacific anchor. A line from there crosses a continent, so draw none.
     document.getElementById("inset-leaders")?.remove();
   }
 
