@@ -696,6 +696,7 @@ html,
 body {
   margin: 0;
   height: 100%;
+  overflow: hidden;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: #0f172a;
   background: var(--cf-page-bg);
@@ -704,7 +705,8 @@ body {
 body {
   display: flex;
   flex-direction: column;
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -996,8 +998,8 @@ body {
 .stage {
   position: relative;
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
-  height: calc(100vh - 4.25rem);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1138,6 +1140,7 @@ body.finish-celebration-active .score {
 .inset-list {
   position: absolute;
   inset: 0;
+  overflow: visible;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -1146,7 +1149,7 @@ body.finish-celebration-active .score {
 
 .inset-map {
   position: absolute;
-  width: min(22rem, 32vw);
+  width: clamp(11rem, 26vw, 18rem);
   margin: 0;
   padding: 0;
   pointer-events: auto;
@@ -1154,7 +1157,7 @@ body.finish-celebration-active .score {
 }
 
 .inset-map[data-corner="right"] {
-  width: min(26rem, 38vw);
+  width: clamp(9.5rem, 16vw, 14rem);
 }
 
 .inset-map__view {
@@ -5106,150 +5109,114 @@ body.finish-celebration-active .score {
     })).filter((card) => card.w > 0 && card.h > 0);
   }
 
-  function fitMapBox(availW, availH) {
-    const aspect = worldPixelAspect();
-    let w = Math.max(0, availW);
-    let h = w / aspect;
-    if (h > availH) {
-      h = Math.max(0, availH);
-      w = h * aspect;
-    }
-    return { w, h };
-  }
-
-  function planInsetMargin(stageW, stageH, cards, options) {
+  function planInsetMargin(stageW, stageH, cards) {
     const gap = 10;
-    const fullBleed = options?.fullBleed !== false;
-    const aspectBox = fitMapBox(stageW, stageH);
+    const edge = 12;
+    const mapBox = { x: 0, y: 0, w: stageW, h: stageH };
     if (!cards.length) {
-      return {
-        dock: "none",
-        map: {
-          x: (stageW - aspectBox.w) / 2,
-          y: (stageH - aspectBox.h) / 2,
-          w: aspectBox.w,
-          h: aspectBox.h,
-        },
-        slots: [],
-      };
+      return { dock: "none", fullBleed: true, map: mapBox, slots: [] };
     }
     const order = ["caribbean", "mediterranean", "pacific"];
     const line = order.map((id) => cards.find((card) => card.id === id)).filter(Boolean);
     const row = line.length ? line : cards;
     const rowW = row.reduce((sum, card) => sum + card.w, 0) + gap * (row.length - 1);
-    const rowH = Math.max(...row.map((card) => card.h));
-    const full = fitMapBox(stageW, stageH);
-    const spareBelow = stageH - full.h;
-    if (fullBleed && rowW <= stageW && spareBelow >= 0 && full.w >= stageW - 1) {
-      let x = (stageW - rowW) / 2;
-      const slots = row.map((card) => {
-        const slot = { id: card.id, x, y: stageH - card.h, dock: "bottom" };
-        x += card.w + gap;
+    if (rowW > stageW - edge * 2) {
+      let y = stageH - edge;
+      const slots = [...row].reverse().map((card) => {
+        y -= card.h;
+        const slot = {
+          id: card.id,
+          x: Math.max(edge, stageW - card.w - edge),
+          y: Math.max(edge, y),
+          dock: "side",
+        };
+        y -= gap;
         return slot;
       });
-      return {
+      return { dock: "side", fullBleed: true, map: mapBox, slots };
+    }
+    let x = Math.max(edge, (stageW - rowW) / 2);
+    const slots = row.map((card) => {
+      const slot = {
+        id: card.id,
+        x: Math.min(x, Math.max(edge, stageW - card.w - edge)),
+        y: Math.max(edge, stageH - card.h - edge),
         dock: "bottom",
-        fullBleed: true,
-        map: {
-          x: (stageW - full.w) / 2,
-          y: 0,
-          w: full.w,
-          h: full.h,
-        },
-        slots,
       };
-    }
-    if (rowW <= stageW && stageH - rowH - gap >= 120) {
-      const availH = stageH - rowH - gap;
-      const mapBox = fitMapBox(stageW, availH);
-      let x = (stageW - rowW) / 2;
-      const slots = row.map((card) => {
-        const slot = { id: card.id, x, y: stageH - card.h, dock: "bottom" };
-        x += card.w + gap;
-        return slot;
-      });
-      return {
-        dock: "bottom",
-        map: {
-          x: (stageW - mapBox.w) / 2,
-          y: 0,
-          w: mapBox.w,
-          h: mapBox.h,
-        },
-        slots,
-      };
-    }
-    const colW = Math.max(...row.map((card) => card.w));
-    const colH = row.reduce((sum, card) => sum + card.h, 0) + gap * (row.length - 1);
-    if (colH <= stageH && stageW - colW - gap >= 120) {
-      const availW = stageW - colW - gap;
-      const mapBox = fitMapBox(availW, stageH);
-      let y = (stageH - colH) / 2;
-      const slots = row.map((card) => {
-        const slot = { id: card.id, x: stageW - colW + (colW - card.w), y, dock: "side" };
-        y += card.h + gap;
-        return slot;
-      });
-      return {
-        dock: "side",
-        map: {
-          x: Math.max(0, (availW - mapBox.w) / 2),
-          y: (stageH - mapBox.h) / 2,
-          w: mapBox.w,
-          h: mapBox.h,
-        },
-        slots,
-      };
-    }
-    const first = row.slice(0, 2);
-    const second = row.slice(2);
-    const h1 = Math.max(...first.map((card) => card.h), 0);
-    const h2 = second.length ? Math.max(...second.map((card) => card.h)) : 0;
-    const blockH = h1 + (second.length ? gap + h2 : 0);
-    const availH = Math.max(80, stageH - blockH - gap);
-    const mapBox = fitMapBox(stageW, availH);
-    const slots = [];
-    const placeRow = (group, top) => {
-      const width = group.reduce((sum, card) => sum + card.w, 0) + gap * (group.length - 1);
-      let x = (stageW - width) / 2;
-      group.forEach((card) => {
-        slots.push({ id: card.id, x, y: top + (Math.max(...group.map((item) => item.h)) - card.h), dock: "bottom" });
-        x += card.w + gap;
-      });
-    };
-    placeRow(first, stageH - blockH);
-    if (second.length) placeRow(second, stageH - h2);
-    return {
-      dock: "bottom",
-      map: {
-        x: (stageW - mapBox.w) / 2,
-        y: Math.max(0, (availH - mapBox.h) / 2),
-        w: mapBox.w,
-        h: mapBox.h,
-      },
-      slots,
-    };
+      x += card.w + gap;
+      return slot;
+    });
+    return { dock: "bottom", fullBleed: true, map: mapBox, slots };
   }
 
-  function layoutMapFrame(options) {
+  function layoutMapFrame() {
     if (!map || !stageEl) return;
     const sw = stageEl.clientWidth;
     const sh = stageEl.clientHeight;
     if (sw < 40 || sh < 40) return;
-    insetPlan = planInsetMargin(sw, sh, insetCardBoxes(), options);
+    insetPlan = planInsetMargin(sw, sh, insetCardBoxes());
     const mapEl = map.getContainer();
-    mapEl.style.left = `${Math.round(insetPlan.map.x)}px`;
-    mapEl.style.top = `${Math.round(insetPlan.map.y)}px`;
-    mapEl.style.width = `${Math.round(insetPlan.map.w)}px`;
-    mapEl.style.height = `${Math.round(insetPlan.map.h)}px`;
+    mapEl.style.left = "0px";
+    mapEl.style.top = "0px";
+    mapEl.style.width = `${sw}px`;
+    mapEl.style.height = `${sh}px`;
     map.invalidateSize({ animate: false, pan: false });
     const view = L.latLngBounds([WORLD_SOUTH, WORLD_WEST], [WORLD_NORTH, WORLD_EAST]);
     map.setMaxBounds(null);
     map.setMinZoom(0);
     map.fitBounds(view, { padding: [0, 0], animate: false });
-    const fitted = map.getBounds();
-    map.setMinZoom(map.getZoom());
-    map.setMaxBounds(fitted);
+    const containZoom = map.getZoom();
+    const fittedWorld = map.getBounds();
+    const size = map.getSize();
+    const worldAspect = worldPixelAspect();
+    const containerAspect = size.x / Math.max(1, size.y);
+    let openZoom = containZoom;
+    if (containerAspect > worldAspect + 0.001) {
+      openZoom = Math.min(map.getMaxZoom(), containZoom + Math.log2(containerAspect / worldAspect));
+      map.setZoom(openZoom, { animate: false });
+    }
+    map.setMinZoom(openZoom);
+    map.setMaxBounds(fittedWorld);
+    frameOpeningOnNewZealand(openZoom);
+  }
+
+  function ringLngSpan(ring) {
+    let min = Infinity;
+    let max = -Infinity;
+    ring.forEach(([lng]) => {
+      if (lng < min) min = lng;
+      if (lng > max) max = lng;
+    });
+    return max - min;
+  }
+
+  /**
+   * Opening view is closer than the whole world so each main New Zealand
+   * island is a recognizable shape. Minimum zoom stays the full-width fit.
+   */
+  function frameOpeningOnNewZealand(containZoom) {
+    const rings = outerRings("New Zealand");
+    if (rings.length < 2 || !map) return;
+    const narrow = Math.min(...rings.map(ringLngSpan));
+    if (!(narrow > 0)) return;
+    const width = Math.max(1, map.getSize().x);
+    const targetPx = 64;
+    const visibleLng = (narrow * width) / targetPx;
+    const east = 180;
+    const centerLng = east - visibleLng / 2;
+    const zoom = Math.min(map.getMaxZoom(), containZoom + Math.log2(360 / visibleLng));
+    map.setView([-30, centerLng], zoom, { animate: false });
+    const points = rings.flatMap((ring) => ring.map(([lng, lat]) => stagePoint(lat, lng)));
+    const maxX = Math.max(...points.map((point) => point.x));
+    const minY = Math.min(...points.map((point) => point.y));
+    const maxY = Math.max(...points.map((point) => point.y));
+    const stageRect = stageEl.getBoundingClientRect();
+    let dx = 0;
+    let dy = 0;
+    if (maxX > stageRect.width - 10) dx = maxX - (stageRect.width - 10);
+    if (minY < 8) dy = minY - 8;
+    else if (maxY > stageRect.height - 8) dy = maxY - (stageRect.height - 8);
+    if (dx !== 0 || dy !== 0) map.panBy([dx, dy], { animate: false });
   }
 
   function frameLng(lng, frame) {
@@ -5945,7 +5912,7 @@ body.finish-celebration-active .score {
         dock: slot.dock,
         w: el.offsetWidth,
         h: el.offsetHeight,
-        y: stageRect.height - el.offsetHeight,
+        y: Math.max(0, stageRect.height - el.offsetHeight - 12),
       };
     }).filter(Boolean);
     if (cards.length !== slots.length) return null;
@@ -5978,13 +5945,28 @@ body.finish-celebration-active .score {
       hidden.forEach((el) => { el.style.visibility = ""; });
     }
     const gap = 8;
+    const edge = 12;
     const frames = new Map(OVERLAY_INSETS.map((spec) => [spec.id, spec.bounds]));
+    // Gap anchor from the Pacific width before this card was narrowed
+    // (clamp(12.5rem, 30vw, 21rem)). Caribbean and Mediterranean stay put.
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const previousPacificWidth = Math.min(21 * rem, Math.max(12.5 * rem, window.innerWidth * 0.3));
     const choices = cards.map((card) => {
       const frame = frames.get(card.id);
       const xs = [];
-      for (let x = 0; x + card.w <= stageRect.width; x += 8) {
+      const limit = Math.max(0, stageRect.width - card.w);
+      const start = Math.min(edge, limit);
+      const end = Math.max(start, limit - edge);
+      for (let x = start; x <= end; x += 8) {
         if (!cardCoversForeignLand(land, cols, rows, step, stageRect, mapRect, frame, x, card.y, card.w, card.h)) {
           xs.push(x);
+        }
+      }
+      if (!xs.length) {
+        for (let x = 0; x <= limit; x += 8) {
+          if (!cardCoversForeignLand(land, cols, rows, step, stageRect, mapRect, frame, x, card.y, card.w, card.h)) {
+            xs.push(x);
+          }
         }
       }
       return { card, xs };
@@ -5997,8 +5979,9 @@ body.finish-celebration-active .score {
     if (left && middle && right) {
       const leftX = left.xs[0];
       const rightX = right.xs[right.xs.length - 1];
+      const anchoredRight = Math.min(rightX, Math.max(0, stageRect.width - edge - previousPacificWidth));
       const gapStart = leftX + left.card.w + gap;
-      const gapEnd = rightX - gap - middle.card.w;
+      const gapEnd = anchoredRight - gap - middle.card.w;
       let middleX = null;
       if (gapStart <= gapEnd) {
         const target = (gapStart + gapEnd) / 2;
@@ -6022,14 +6005,73 @@ body.finish-celebration-active .score {
     return null;
   }
 
+  function stagePoint(lat, lng) {
+    const stageRect = stageEl.getBoundingClientRect();
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const pt = map.latLngToContainerPoint([lat, lng]);
+    return {
+      x: mapRect.left - stageRect.left + pt.x,
+      y: mapRect.top - stageRect.top + pt.y,
+    };
+  }
+
+  function outerRings(admin) {
+    const feature = allFeatures.find((item) => (item.properties || {}).ADMIN === admin);
+    if (!feature) return [];
+    return featurePolygons(feature)
+      .map((poly) => poly[0])
+      .filter((ring) => ring && ring.length >= 3);
+  }
+
+  /**
+   * Park the Pacific card on Australia, with both New Zealand islands
+   * strictly to its right. Positions come from the country rings.
+   */
+  function pacificCardOrigin(card) {
+    if (!map || !stageEl) return null;
+    const nzRings = outerRings("New Zealand");
+    const ausRings = outerRings("Australia");
+    if (nzRings.length < 2 || !ausRings.length) return null;
+    const nzPoints = nzRings.flatMap((ring) => ring.map(([lng, lat]) => stagePoint(lat, lng)));
+    const nzMinX = Math.min(...nzPoints.map((point) => point.x));
+    const width = card.offsetWidth;
+    const height = card.offsetHeight;
+    const gap = 20;
+    let x = nzMinX - gap - width;
+    if (x + width > nzMinX - 8) x = nzMinX - 8 - width;
+    const stageRect = stageEl.getBoundingClientRect();
+    const right = x + width;
+    const ausPoints = ausRings
+      .flatMap((ring) => ring.map(([lng, lat]) => stagePoint(lat, lng)))
+      .filter((point) => point.x >= x + 6 && point.x <= right - 6);
+    let y = stageRect.height - height - 12;
+    if (ausPoints.length >= 3) {
+      const top = Math.min(...ausPoints.map((point) => point.y));
+      const bot = Math.max(...ausPoints.map((point) => point.y));
+      y = top + (bot - top) * 0.28;
+      const maxY = Math.max(8, stageRect.height - height - 8);
+      y = Math.max(8, Math.min(y, maxY));
+    }
+    return { x: Math.max(0, x), y };
+  }
+
   function applyInsetSlots(slots) {
     const byId = new Map(slots.map((slot) => [slot.id, slot]));
     insetList.querySelectorAll(".inset-map").forEach((card) => {
       const slot = byId.get(card.dataset.insetGroup);
       if (!slot) return;
+      let x = slot.x;
+      let y = slot.y;
+      if (slot.id === "pacific") {
+        const origin = pacificCardOrigin(card);
+        if (origin) {
+          x = origin.x;
+          y = origin.y;
+        }
+      }
       card.dataset.dock = slot.dock;
-      card.style.left = `${Math.round(slot.x)}px`;
-      card.style.top = `${Math.round(slot.y)}px`;
+      card.style.left = `${Math.round(x)}px`;
+      card.style.top = `${Math.round(y)}px`;
       card.style.right = "auto";
       card.style.bottom = "auto";
     });
@@ -6037,15 +6079,8 @@ body.finish-celebration-active .score {
 
   function layoutInsetCards() {
     if (!insetList || !insetPlan) return;
-    if (insetPlan.fullBleed) {
-      const seated = seatCardsOnOcean(insetPlan.slots);
-      if (seated) {
-        applyInsetSlots(seated);
-        return;
-      }
-      layoutMapFrame({ fullBleed: false });
-    }
-    applyInsetSlots(insetPlan.slots);
+    const seated = insetPlan.fullBleed ? seatCardsOnOcean(insetPlan.slots) : null;
+    applyInsetSlots(seated || insetPlan.slots);
   }
 
   function ensureLeaderLayer() {
@@ -6268,6 +6303,7 @@ body.finish-celebration-active .score {
     buildMainMapDots();
     layoutInsetCards();
     layoutMapFrame();
+    layoutInsetCards();
     buildMainMapClusterOutlines();
     updateLeaderLines();
     map.on("zoom move", updateLeaderLines);
