@@ -5177,46 +5177,6 @@ body.finish-celebration-active .score {
     }
     map.setMinZoom(openZoom);
     map.setMaxBounds(fittedWorld);
-    frameOpeningOnNewZealand(openZoom);
-  }
-
-  function ringLngSpan(ring) {
-    let min = Infinity;
-    let max = -Infinity;
-    ring.forEach(([lng]) => {
-      if (lng < min) min = lng;
-      if (lng > max) max = lng;
-    });
-    return max - min;
-  }
-
-  /**
-   * Opening view is closer than the whole world so each main New Zealand
-   * island is a recognizable shape. Minimum zoom stays the full-width fit.
-   */
-  function frameOpeningOnNewZealand(containZoom) {
-    const rings = outerRings("New Zealand");
-    if (rings.length < 2 || !map) return;
-    const narrow = Math.min(...rings.map(ringLngSpan));
-    if (!(narrow > 0)) return;
-    const width = Math.max(1, map.getSize().x);
-    const targetPx = 64;
-    const visibleLng = (narrow * width) / targetPx;
-    const east = 180;
-    const centerLng = east - visibleLng / 2;
-    const zoom = Math.min(map.getMaxZoom(), containZoom + Math.log2(360 / visibleLng));
-    map.setView([-30, centerLng], zoom, { animate: false });
-    const points = rings.flatMap((ring) => ring.map(([lng, lat]) => stagePoint(lat, lng)));
-    const maxX = Math.max(...points.map((point) => point.x));
-    const minY = Math.min(...points.map((point) => point.y));
-    const maxY = Math.max(...points.map((point) => point.y));
-    const stageRect = stageEl.getBoundingClientRect();
-    let dx = 0;
-    let dy = 0;
-    if (maxX > stageRect.width - 10) dx = maxX - (stageRect.width - 10);
-    if (minY < 8) dy = minY - 8;
-    else if (maxY > stageRect.height - 8) dy = maxY - (stageRect.height - 8);
-    if (dx !== 0 || dy !== 0) map.panBy([dx, dy], { animate: false });
   }
 
   function frameLng(lng, frame) {
