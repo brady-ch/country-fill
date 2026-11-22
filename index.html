@@ -1174,7 +1174,7 @@ body.finish-celebration-active .score {
 .inset-map__view svg {
   display: block;
   width: 100%;
-  height: 100%;
+  height: auto;
 }
 
 .inset-reference,
@@ -5095,18 +5095,6 @@ body.finish-celebration-active .score {
     },
   ];
 
-  function mercatorY(lat) {
-    const sin = Math.sin((lat * Math.PI) / 180);
-    const clamped = Math.max(-0.999999, Math.min(0.999999, sin));
-    return Math.log((1 + clamped) / (1 - clamped)) / 2;
-  }
-
-  function worldPixelAspect() {
-    const xSpan = ((WORLD_EAST - WORLD_WEST) * Math.PI) / 180;
-    const ySpan = mercatorY(WORLD_NORTH) - mercatorY(WORLD_SOUTH);
-    return xSpan / ySpan;
-  }
-
   let insetPlan = null;
 
   function insetCardBoxes() {
@@ -5170,29 +5158,23 @@ body.finish-celebration-active .score {
     mapEl.style.width = `${sw}px`;
     mapEl.style.height = `${sh}px`;
     map.invalidateSize({ animate: false, pan: false });
-    const view = L.latLngBounds([WORLD_SOUTH, WORLD_WEST], [WORLD_NORTH, WORLD_EAST]);
+    const size = map.getSize();
+    if (size.x < 40 || size.y < 40) return;
+    // Web Mercator draws 360° across 256px at zoom 0. This zoom is the
+    // minimum: longitude -180 sits on the left edge and 180 on the right.
+    // No fitBounds and no maxBounds — both pan the opening frame.
+    const openZoom = Math.log2(size.x / 256);
     map.setMaxBounds(null);
     map.setMinZoom(0);
-    map.fitBounds(view, { padding: [0, 0], animate: false });
-    const containZoom = map.getZoom();
-    const fittedWorld = map.getBounds();
-    const size = map.getSize();
-    const worldAspect = worldPixelAspect();
-    const containerAspect = size.x / Math.max(1, size.y);
-    let openZoom = containZoom;
-    if (containerAspect > worldAspect + 0.001) {
-      openZoom = Math.min(map.getMaxZoom(), containZoom + Math.log2(containerAspect / worldAspect));
-      map.setZoom(openZoom, { animate: false });
-    }
+    map.setMaxZoom(Math.max(6, openZoom));
+    const north = map.project([WORLD_NORTH, 0], openZoom);
+    const south = map.project([WORLD_SOUTH, 0], openZoom);
+    const midY = (north.y + south.y) / 2;
+    const center = map.unproject([size.x / 2, midY], openZoom);
+    map.stop();
+    map.setView(center, openZoom, { animate: false });
     map.setMinZoom(openZoom);
-    // A tight max-bounds box pans the opening frame. Pad it so the fitted
-    // world stays where fitBounds put it, still edge to edge.
     map.stop();
-    map.setMaxBounds(fittedWorld.pad(0.15));
-    // setMaxBounds starts a pan animation. Finish that correction now so the
-    // inset search sees the same coast the screen will keep showing.
-    map.stop();
-    map.panInsideBounds(fittedWorld.pad(0.15), { animate: false });
   }
 
   function frameLng(lng, frame) {
@@ -5831,6 +5813,10 @@ body.finish-celebration-active .score {
       const viewEl = document.createElement("div");
       viewEl.className = "inset-map__view";
       viewEl.style.aspectRatio = `${view.w} / ${view.h}`;
+      viewEl.dataset.aspect = String(view.h / view.w);
+      svg.setAttribute("width", String(view.w));
+      svg.setAttribute("height", String(view.h));
+      svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
       viewEl.appendChild(svg);
       li.appendChild(viewEl);
       insetList.appendChild(li);
@@ -6052,6 +6038,11 @@ body.finish-celebration-active .score {
         if (!el) return null;
         const share = INSET_WIDTH_SHARE[slots[i].id] || 0.16;
         el.style.width = `${share * scale * 100}%`;
+        const viewEl = el.querySelector(".inset-map__view");
+        const aspect = Number(viewEl?.dataset.aspect) || 0.66;
+        // Definite height from the stage share. A percentage SVG height
+        // otherwise resolves against the stage and the card becomes a page frame.
+        if (viewEl) viewEl.style.height = `${Math.max(8, stageRect.width * share * scale * aspect)}px`;
         cards.push(el);
       }
       const measured = cards.map((el) => ({
@@ -6195,64 +6186,15 @@ body.finish-celebration-active .score {
     const seated = seatCardsOnOcean(insetPlan.slots);
     if (!seated) {
       console.warn("Country Fill insets had no open-ocean seat.");
+      applyInsetSlots(insetPlan.slots);
       return;
     }
     applyInsetSlots(seated);
   }
 
-  function ensureLeaderLayer() {
-    let svg = document.getElementById("inset-leaders");
-    if (svg) return svg;
-    svg = document.createElementNS(SVG_NS, "svg");
-    svg.id = "inset-leaders";
-    svg.setAttribute("class", "inset-leaders");
-    svg.setAttribute("aria-hidden", "true");
-    stageEl?.appendChild(svg);
-    return svg;
-  }
-
   function updateLeaderLines() {
-    const svg = ensureLeaderLayer();
-    if (!svg || !map || !stageEl || !insetList) return;
-    const stageRect = stageEl.getBoundingClientRect();
-    svg.setAttribute("viewBox", `0 0 ${stageRect.width} ${stageRect.height}`);
-    svg.replaceChildren();
-    const mapRect = map.getContainer().getBoundingClientRect();
-    insetList.querySelectorAll(".inset-map").forEach((card) => {
-      const lat = Number(card.dataset.anchorLat);
-      const lng = Number(card.dataset.anchorLng);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-      const pt = map.latLngToContainerPoint([lat, lng]);
-      const x1 = mapRect.left - stageRect.left + pt.x;
-      const y1 = mapRect.top - stageRect.top + pt.y;
-      const cardRect = card.getBoundingClientRect();
-      const dock = card.dataset.dock || "bottom";
-      let x2;
-      let y2;
-      let d;
-      if (dock === "side") {
-        x2 = cardRect.left - stageRect.left;
-        y2 = cardRect.top - stageRect.top + cardRect.height / 2;
-        const bendX = x1 + (x2 - x1) * 0.42;
-        d = `M ${x1.toFixed(1)} ${y1.toFixed(1)} L ${bendX.toFixed(1)} ${y1.toFixed(1)} L ${bendX.toFixed(1)} ${y2.toFixed(1)} L ${x2.toFixed(1)} ${y2.toFixed(1)}`;
-      } else {
-        x2 = cardRect.left - stageRect.left + cardRect.width / 2;
-        y2 = cardRect.top - stageRect.top;
-        const bendY = y1 + (y2 - y1) * 0.42;
-        d = `M ${x1.toFixed(1)} ${y1.toFixed(1)} L ${x1.toFixed(1)} ${bendY.toFixed(1)} L ${x2.toFixed(1)} ${bendY.toFixed(1)} L ${x2.toFixed(1)} ${y2.toFixed(1)}`;
-      }
-      const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("class", "inset-leader");
-      path.dataset.insetGroup = card.dataset.insetGroup || "";
-      path.setAttribute("d", d);
-      svg.appendChild(path);
-      const tip = document.createElementNS(SVG_NS, "circle");
-      tip.setAttribute("class", "inset-leader-tip");
-      tip.setAttribute("cx", x1.toFixed(1));
-      tip.setAttribute("cy", y1.toFixed(1));
-      tip.setAttribute("r", "3.4");
-      svg.appendChild(tip);
-    });
+    // Cards sit on the ocean. Leader lines were the long strokes across the map.
+    document.getElementById("inset-leaders")?.remove();
   }
 
   let framingMap = false;
