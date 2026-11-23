@@ -4777,6 +4777,9 @@ body.finish-celebration-active .score {
   /**
    * Put each Pacific region dot on the dashed face center.
    * Tahiti, Bora Bora, and the eight Hawaiian islands keep their own dots.
+   * The Great Barrier Reef and the Whitsunday Islands do too. At minimum zoom
+   * the shared center stacks those two under another place, and the reef
+   * water is left empty.
    * A face whose only readable mark is one country polygon keeps that polygon
    * centered instead of a dot.
    */
@@ -5854,13 +5857,18 @@ body.finish-celebration-active .score {
 
   function isPacificOutlier(entry) {
     return HAWAII_CHAIN_IDS.has(entry.id)
+      || entry.id === "CUSTOM_70"
+      || entry.id === "CUSTOM_82"
       || entry.displayName === "Tahiti"
-      || entry.displayName === "Bora Bora";
+      || entry.displayName === "Bora Bora"
+      || entry.displayName === "Great Barrier Reef"
+      || entry.displayName === "Whitsunday Islands";
   }
 
   /**
-   * One mark at each Pacific region center. Tahiti, Bora Bora, and the eight
-   * Hawaiian islands stay as their own dots and keep their Seterra names.
+   * One mark at each Pacific region center. Tahiti, Bora Bora, the eight
+   * Hawaiian islands, the Great Barrier Reef, and the Whitsunday Islands stay
+   * as their own dots.
    */
   function drawPacificCenteredMarks(svg, frame, project, view, shared, pathsByCode, region) {
     const regions = region.strokes.map((stroke, index) => {
