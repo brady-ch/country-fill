@@ -1698,12 +1698,13 @@ body.finish-celebration-active .score {
   const WORLD_WEST = -180;
   const WORLD_EAST = 180;
   /**
-   * Open view is one world wide, centered on the Pacific. Longitudes west of
-   * this Atlantic cut are drawn once at +360, so Alaska and the Pacific
-   * islands continue to the right of the date line instead of across the map.
+   * Open view is one world wide. The left edge is the water between the
+   * Alaska panhandle (~130°W) and Cape Alava (~124.7°W). Longitudes west of
+   * that edge are drawn once at +360, so Alaska and Hawaii sit on the far
+   * right with the Pacific. The Lower 48 stays unshifted, just inside the edge.
    */
-  const VIEW_SPLIT_LNG = -25;
-  const VIEW_CENTER_LNG = 160;
+  const VIEW_SPLIT_LNG = -128;
+  const VIEW_CENTER_LNG = 52;
   const VIEW_NORTH = 64;
   const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -1743,8 +1744,6 @@ body.finish-celebration-active .score {
   const mapCodePrimaryEntry = new Map();
   /** @type {Record<string, string>} */
   let nameCollisions = {};
-  let gameTotal = 0;
-  let score = 0;
 
   const inputEl = document.getElementById("country-input");
   const statusEl = document.getElementById("status");
@@ -1878,15 +1877,73 @@ body.finish-celebration-active .score {
     if (kind) statusEl.classList.add(`status--${kind}`);
   }
 
+  function filledCount() {
+    let count = 0;
+    entries.forEach((entry) => {
+      if (entry.filled) count += 1;
+    });
+    return count;
+  }
+
+  function remainingNames() {
+    const names = [];
+    entries.forEach((entry) => {
+      if (!entry.filled) names.push(entry.displayName);
+    });
+    names.sort((a, b) => a.localeCompare(b, "en"));
+    return names;
+  }
+
+  function placeCountTotal() {
+    return entries.size;
+  }
+
   function updateScoreDisplay() {
-    scoreEl.textContent = String(score);
-    const total = gameTotal || entries.size;
-    const summary = `${score} / ${total} named`;
+    const filled = filledCount();
+    const total = placeCountTotal();
+    scoreEl.textContent = String(filled);
+    const summary = `${filled} / ${total} named`;
     legendSummary.textContent = summary;
     if (scoreTotalEl) scoreTotalEl.textContent = `/ ${total}`;
     if (legendToggleBtn && entries.size) {
       const open = legendToggleBtn.getAttribute("aria-expanded") === "true";
-      legendToggleBtn.textContent = open ? "Hide legend" : `Legend (${score})`;
+      legendToggleBtn.textContent = open ? "Hide legend" : `Legend (${filled})`;
+    }
+  }
+
+  function renderRemainingPanel() {
+    const names = remainingNames();
+    const panelOpen = !remainingPanel.classList.contains("hidden");
+    if (!panelOpen) return;
+    if (!names.length) {
+      remainingPanel.classList.add("hidden");
+      document.body.classList.remove("has-remaining");
+      remainingList.replaceChildren();
+      return;
+    }
+    remainingList.replaceChildren();
+    names.forEach((name) => {
+      const li = document.createElement("li");
+      li.textContent = name;
+      remainingList.appendChild(li);
+    });
+    setStatus(`${names.length} countries still blank (listed below).`, null);
+  }
+
+  function renderProgress(message, kind) {
+    updateScoreDisplay();
+    renderRemainingPanel();
+    if (message !== undefined) {
+      setStatus(message, kind ?? null);
+    }
+  }
+
+  function assertListCountMatches(listPayload) {
+    const expected = listPayload.meta?.count;
+    if (expected !== entries.size) {
+      throw new Error(
+        `Country list count mismatch: meta.count is ${expected}, entries has ${entries.size}`,
+      );
     }
   }
 
@@ -1990,6 +2047,19 @@ body.finish-celebration-active .score {
     if (dot) dot.classList.toggle("island-marker__dot--filled", filled);
   }
 
+  function paintSharedPlaceMarks() {
+    document.querySelectorAll("[data-place-ids]").forEach((el) => {
+      const ids = (el.dataset.placeIds || "").split(/\s+/).filter(Boolean);
+      const anyFilled = ids.some((entryId) => entries.get(entryId)?.filled);
+      const style = anyFilled ? filledStyle : unfilledStyle;
+      el.setAttribute("fill", style.fillColor);
+      el.setAttribute("stroke", style.color);
+      if (style.fillOpacity != null) {
+        el.setAttribute("fill-opacity", String(style.fillOpacity));
+      }
+    });
+  }
+
   function buildLeafletStyles(filledHex) {
     const stroke = darkenHex(filledHex, 0.22);
     unfilledStyle = {
@@ -2067,10 +2137,6 @@ body.finish-celebration-active .score {
     } catch {
       /* ignore */
     }
-  }
-
-  function placeCountTotal() {
-    return gameTotal || entries.size;
   }
 
   function scheduleFinishTimer(fn, ms) {
@@ -2180,8 +2246,7 @@ body.finish-celebration-active .score {
   }
 
   function maybeCelebrateFinish() {
-    const total = placeCountTotal();
-    if (score < total) return;
+    if (!isGameComplete()) return;
     if (finishCelebrationActive && !finishCelebrationIsPreview) return;
     const kind = loadStoredFinishAnimation();
     playFinishCelebration(kind);
@@ -2189,7 +2254,7 @@ body.finish-celebration-active .score {
   }
 
   function isGameComplete() {
-    return score >= placeCountTotal();
+    return remainingNames().length === 0;
   }
 
   function setLegendExpanded(expanded) {
@@ -2222,14 +2287,13 @@ body.finish-celebration-active .score {
       }
     }
     setIslandMarkerFilled(entry, filled);
+    paintSharedPlaceMarks();
   }
 
   function fillEntry(id) {
     const entry = entries.get(id);
     if (!entry || entry.filled) return false;
     setFilled(entry, true);
-    score += 1;
-    updateScoreDisplay();
     return true;
   }
 
@@ -2282,10 +2346,9 @@ body.finish-celebration-active .score {
     fillEntry(id);
     if (isGameComplete()) {
       maybeCelebrateFinish();
-      const total = placeCountTotal();
-      setStatus(`Every place named — ${total} / ${total}.`, "hit");
+      renderProgress(`Every place named — ${placeCountTotal()} / ${placeCountTotal()}.`, "hit");
     } else {
-      setStatus(`Filled: ${entry.displayName}`, "hit");
+      renderProgress(`Filled: ${entry.displayName}`, "hit");
     }
     inputEl.value = "";
     inputEl.focus();
@@ -2303,33 +2366,23 @@ body.finish-celebration-active .score {
   }
 
   function showRemaining() {
-    const names = [];
-    entries.forEach((entry) => {
-      if (!entry.filled) names.push(entry.displayName);
-    });
-    names.sort((a, b) => a.localeCompare(b, "en"));
-
-    remainingList.replaceChildren();
-    names.forEach((name) => {
-      const li = document.createElement("li");
-      li.textContent = name;
-      remainingList.appendChild(li);
-    });
-
+    const names = remainingNames();
+    if (!names.length) {
+      remainingPanel.classList.add("hidden");
+      document.body.classList.remove("has-remaining");
+      remainingList.replaceChildren();
+      setStatus("Every country is filled.", null);
+      return;
+    }
     remainingPanel.classList.remove("hidden");
     document.body.classList.add("has-remaining");
-    setStatus(
-      names.length ? `${names.length} countries still blank (listed below).` : "Every country is filled.",
-      null
-    );
+    renderProgress();
     setTimeout(() => remainingPanel.scrollIntoView({ behavior: "smooth", block: "nearest" }), 50);
   }
 
   function restart() {
     stopFinishCelebration();
     clearInsetPeek();
-    score = 0;
-    updateScoreDisplay();
     entries.forEach((entry) => setFilled(entry, false));
     mapByCode.forEach((mapEntry, code) => {
       mapEntry.entryIds = new Set();
@@ -2339,7 +2392,7 @@ body.finish-celebration-active .score {
     remainingPanel.classList.add("hidden");
     document.body.classList.remove("has-remaining");
     remainingList.replaceChildren();
-    setStatus("Click the map or type a country name.", null);
+    renderProgress("Click the map or type a country name.", null);
     inputEl.value = "";
     inputEl.focus();
   }
@@ -5553,11 +5606,10 @@ body.finish-celebration-active .score {
     map.invalidateSize({ animate: false, pan: false });
     const size = map.getSize();
     if (size.x < 40 || size.y < 40) return;
-    // Width fit: 360° is exactly the stage, so a side copy of the date line
-    // is not on screen. Center 160°E puts that date line in the view. Land
-    // west of 25°W is drawn at +360, so the Pacific islands continue to the
-    // right of Australia. The top edge is 64°N, through interior Alaska.
-    // No fitBounds.
+    // Width fit: 360° is exactly the stage. One full turn, no fitBounds and
+    // no maxBounds. The left edge is 128°W (center 52°E). Alaska and Hawaii
+    // are drawn at +360 on the far right. The Lower 48 starts just inside
+    // the left edge. The top edge stays 64°N.
     const openZoom = Math.log2(size.x / 256);
     map.setMaxBounds(null);
     map.setMinZoom(0);
@@ -6301,11 +6353,19 @@ body.finish-celebration-active .score {
     return a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
   }
 
-  /** Longitude columns that contain land between two latitudes. 0.25° cells, view longitudes. */
+  /**
+   * Longitude columns that contain land between two latitudes. 0.25° cells,
+   * view longitudes. The window covers the unshifted Americas (west of 40°W)
+   * and the shifted Pacific, so a bottom card cannot sit on Chile.
+   */
+  const LAND_MASK_CELL = 0.25;
+  const LAND_MASK_ORIGIN = -180;
+  const LAND_MASK_SPAN = 540;
+
   function landLngMask(minLat, maxLat) {
-    const cell = 0.25;
-    const origin = -40;
-    const n = Math.round(400 / cell);
+    const cell = LAND_MASK_CELL;
+    const origin = LAND_MASK_ORIGIN;
+    const n = Math.round(LAND_MASK_SPAN / cell);
     const blocked = new Uint8Array(n);
     const lats = [];
     const step = 0.4;
@@ -6365,13 +6425,13 @@ body.finish-celebration-active .score {
   }
 
   function maskLandCount(mask, lng0, lng1) {
-    const cell = 0.25;
-    const origin = -40;
+    const cell = LAND_MASK_CELL;
+    const origin = LAND_MASK_ORIGIN;
     const n = mask.length;
     let a = Math.min(lng0, lng1);
     let b = Math.max(lng0, lng1);
     a = Math.max(origin, a);
-    b = Math.min(origin + 400, b);
+    b = Math.min(origin + LAND_MASK_SPAN, b);
     if (b - a < 0.05) return 0;
     let i0 = Math.floor((a - origin) / cell);
     let i1 = Math.floor((b - origin) / cell);
@@ -6502,8 +6562,27 @@ body.finish-celebration-active .score {
         && card.y < meshBox.maxY + pad
         && card.y + card.h > meshBox.minY - pad;
     };
+    // Dots with no country polygon (South Georgia, Tristan) still count as
+    // a country. The land scan cannot see them.
+    const stageRectForDots = stageEl.getBoundingClientRect();
+    const placeDots = [...map.getContainer().querySelectorAll(".island-marker")].map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2 - stageRectForDots.left,
+        y: rect.top + rect.height / 2 - stageRectForDots.top,
+      };
+    });
+    const coversPlace = (card, x) => {
+      const pad = 8;
+      for (let i = 0; i < placeDots.length; i += 1) {
+        const point = placeDots[i];
+        if (point.y < card.y - pad || point.y > card.y + card.h + pad) continue;
+        if (point.x >= x - pad && point.x <= x + card.w + pad) return true;
+      }
+      return false;
+    };
     const blocked = (card, x) => {
-      if (coversEaster(card, x) || coversMesh(card, x)) return 1;
+      if (coversEaster(card, x) || coversMesh(card, x) || coversPlace(card, x)) return 1;
       const mask = masks.get(card.id);
       const land = maskLandCount(mask, lngAt(x), lngAt(x + card.w));
       if (land > 0) return land;
@@ -6920,6 +6999,8 @@ body.finish-celebration-active .score {
     let geojson;
     let aliasesByCode;
     let gameCountries;
+    /** @type {{ meta?: { count?: number }, countries?: unknown[] } & unknown[]} */
+    let listPayload;
 
     await loadNameCollisions();
 
@@ -6927,9 +7008,8 @@ body.finish-celebration-active .score {
       const embedded = window.__COUNTRY_FILL_DATA__;
       geojson = embedded.geojson;
       aliasesByCode = embedded.aliases;
-      const listPayload = embedded.countries;
+      listPayload = embedded.countries;
       gameCountries = listPayload.countries || listPayload;
-      gameTotal = listPayload.meta?.count || gameCountries.length;
     } else {
       const [geoRes, aliasRes, listRes] = await Promise.all([
         fetch("data/ne_110m_admin_0_countries.geojson"),
@@ -6946,11 +7026,11 @@ body.finish-celebration-active .score {
       aliasesByCode = await aliasRes.json();
       const listPayload = await listRes.json();
       gameCountries = listPayload.countries || listPayload;
-      gameTotal = listPayload.meta?.count || gameCountries.length;
     }
 
     indexGeoFeatures(geojson);
     buildLegend(gameCountries);
+    assertListCountMatches(listPayload);
     await loadIslandRegionPins();
     indexPrimaryEntriesForMapCodes(gameCountries);
 
@@ -6982,6 +7062,22 @@ body.finish-celebration-active .score {
     layoutInsetCards();
     layoutMapFrame();
     layoutInsetCards();
+    window.__countryFillView = {
+      splitLng: VIEW_SPLIT_LNG,
+      centerLng: VIEW_CENTER_LNG,
+      north: VIEW_NORTH,
+      projectRing(ring) {
+        return displayRing(ring).map(([lng, lat]) => {
+          const point = stagePoint(lat, lng);
+          return { lng, lat, x: point.x, y: point.y };
+        });
+      },
+      project(lat, lng) {
+        const view = viewLng(lng);
+        const point = stagePoint(lat, view);
+        return { lng: view, x: point.x, y: point.y };
+      },
+    };
     buildMainMapClusterOutlines();
     centerPacificRegionMarks();
     updateLeaderLines();
